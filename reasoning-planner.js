@@ -235,6 +235,7 @@
         steps.push({
           id: idx + 1,
           stepId: idx,
+          goalId: rawStep.goalId || null,
           type: "FILL_FORM",
           target: "all form fields",
           fieldHint: rawStep.fieldHint || "all form fields",
@@ -252,6 +253,7 @@
         steps.push({
           id: idx + 1,
           stepId: idx,
+          goalId: rawStep.goalId || null,
           type: "FILL",
           target: rawStep.fieldHint,
           fieldHint: rawStep.fieldHint,
@@ -287,10 +289,16 @@
         steps.push({
           id: idx + 1,
           stepId: idx,
+          goalId: rawStep.goalId || null,
           type: "CLICK",
           target: targetLabel,
           targetHint: targetLabel,
           legacyTarget: rawStep.legacyTarget || null,
+          query: rawStep.query || null,
+          isProductSelection: !!rawStep.isProductSelection,
+          isExplicitTarget: !!rawStep.isExplicitTarget,
+          explicitTarget: rawStep.explicitTarget || null,
+          isMostRelevant: !!rawStep.isMostRelevant,
           risk: riskAssessment.risk || riskAssessment.level,
           level: riskAssessment.level,
           requiresApproval: riskAssessment.requiresApproval,
@@ -310,6 +318,7 @@
         steps.push({
           id: idx + 1,
           stepId: idx,
+          goalId: rawStep.goalId || null,
           type: "SUBMIT",
           target: targetHint,
           targetHint: targetHint,
@@ -329,6 +338,7 @@
         steps.push({
           id: idx + 1,
           stepId: idx,
+          goalId: rawStep.goalId || null,
           type: "SCROLL",
           target: "PAGE",
           amount: rawStep.amount || 500,
@@ -358,13 +368,40 @@
       reasoningTrace.push("Safety policy: High-impact action detected. Autonomous loop will pause for human approval.");
     }
 
+    const goals = Array.isArray(parsedTask.goals)
+      ? parsedTask.goals.map((g) => ({ ...g, completed: false, verified: false }))
+      : [];
+
     return {
       intentSummary: intentSummary,
       totalSteps: steps.length,
       hasHighRiskStep: hasHighRiskStep,
       steps: steps,
+      goals: goals,
       reasoningTrace: reasoningTrace
     };
+  }
+
+  /**
+   * Helper to verify if the overall user task and all subgoals have completed successfully.
+   * Ensures agent loop does not terminate prematurely merely because one action succeeded.
+   *
+   * @param {Object} plan - The reasoning plan from planTask
+   * @param {Array<Object>} executionHistory - Complete history of executed steps
+   * @returns {boolean} True only when all steps/goals in plan are verified
+   */
+  function isOverallTaskCompleted(plan, executionHistory = []) {
+    if (!plan || !Array.isArray(plan.steps) || plan.steps.length === 0) {
+      return false;
+    }
+    // All planned steps must be accounted for in executionHistory with successful execution
+    const executedStepIndices = new Set(
+      executionHistory
+        .filter((h) => h && h.executed && h.status === "success")
+        .map((h) => (typeof h.step === "number" ? h.step - 1 : (typeof h.stepId === "number" ? h.stepId : -1)))
+    );
+
+    return plan.steps.every((st, idx) => executedStepIndices.has(idx) || executedStepIndices.has(st.stepId));
   }
 
   /**
@@ -604,6 +641,7 @@
     planTask,
     validatePreconditions,
     evaluateSafetyGate,
-    verifyPostconditions
+    verifyPostconditions,
+    isOverallTaskCompleted
   };
 });

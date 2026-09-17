@@ -73,8 +73,8 @@
     }
 
     // 2. Search query pattern:
-    // Strictly bounds the query before verbs like 'and identify', 'and find', 'and open', 'and click', 'and select', etc.
-    const mSearch = taskClean.match(/(?<!\bfill\s)(?<!\benter\s)(?<!\btype\s)(?<!\bclick\s)(?<!\bfind\s)\bsearch\s+(?:for\s+)?(?!(?:the\s+)?(?:box|input|field|bar|area|button)\b)['"]?([^'",;]+?)['"]?(?:\s+(?:and\s+then|and\s+(?:identify|find|open|click|select|locate|choose)|then\s+(?:identify|find|open|click|select|locate|choose))\b|[.,;!?]|$)/i);
+    // Strictly bounds the query before verbs like 'and identify', 'and find', 'and open', 'and click', 'and select', 'and visit', etc.
+    const mSearch = taskClean.match(/(?<!\bfill\s)(?<!\benter\s)(?<!\btype\s)(?<!\bclick\s)(?<!\bfind\s)\bsearch\s+(?:for\s+)?(?!(?:the\s+)?(?:box|input|field|bar|area|button)\b)['"]?([^'",;]+?)['"]?(?:\s+(?:and\s+then|and\s+(?:identify|find|open|click|select|locate|choose|visit)|then\s+(?:identify|find|open|click|select|locate|choose|visit))\b|[.,;!?]|$)/i);
     if (mSearch) {
       const val = mSearch[1].trim();
       if (val && !/^(?:the|a|an|it|this|that|box|input|field|bar|area|button)$/i.test(val)) {
@@ -231,18 +231,57 @@
     if (!/\bsearch\b/i.test(searchTaskText)) return null;
 
     const hasSearchBoxPrefix = /^(?:find|locate|go\s+to|click)\s+(?:on\s+)?(?:the\s+)?(?:search\s+(?:box|input|field|bar|area)|search)(?:\s+(?:in|on|at|of)\s+[a-zA-Z0-9_\-]+)?\b/i.test(searchTaskText);
-    const productMatch = searchTaskText.match(/(?:identify|find|select|choose|open|click|view)\s+(?:on\s+)?(?:the\s+)?((?:(?:most\s+relevant|actual|first|top|selected|chosen)\s+)*(?:product|result|item|listing|video|movie|article|song|track|stream|content))/i);
-    const hasProductOpen = !!productMatch || /\bopen\s+(?:it|that|the\s+product|the\s+result|the\s+video|the\s+item)\b/i.test(searchTaskText);
-    const productTarget = productMatch ? productMatch[1].trim() : "most relevant product";
+
+    let isExplicitTarget = false;
+    let explicitTarget = null;
+    let isMostRelevant = false;
+    let hasProductOpen = false;
+    let productTarget = null;
+
+    // A. Explicit named target: "click the result called XYZ_NONEXISTENT_987654", "select result named X", "open product with title Y"
+    const calledTargetMatch = searchTaskText.match(/(?:identify|find|select|choose|open|click|visit|view)\s+(?:on\s+)?(?:the\s+)?(?:(?:most\s+relevant|actual|first|top|selected|chosen|official|main|verified|primary)\s+)*(?:product|result|item|listing|video|movie|article|song|track|stream|content|website|site|webpage|page|link|portal|entry)?\s*(?:called|named|titled|with\s+(?:the\s+)?name|with\s+(?:the\s+)?title)\s+['"]?([^'",;]+?)['"]?(?:\s*[,;.]|\s+(?:and|then)|$)/i);
+
+    if (calledTargetMatch) {
+      explicitTarget = calledTargetMatch[1].trim();
+      isExplicitTarget = true;
+      isMostRelevant = false;
+      hasProductOpen = true;
+      productTarget = explicitTarget;
+    } else {
+      // B. Post-search action with named or generic target:
+      // "search OpenAI and select XYZ", "search OpenAI and choose XYZ", "search OpenAI and open XYZ", "search OpenAI and open the most relevant result"
+      const postSearchActionMatch = searchTaskText.match(/(?:,\s*|\s+)(?:and\s+then|and|then)?\s*(?:identify|find|select|choose|open|click|visit|view)\s+(?:on\s+)?(?:the\s+)?([^,;]+?)(?:\s*[,;.]|\s+(?:and\s+then|and|then)\s+(?:find|locate|click|press|tap|play|add)|$)/i);
+      if (postSearchActionMatch) {
+        const candidate = postSearchActionMatch[1].trim();
+        const isGeneric = /^(?:(?:most\s+relevant|actual|first|top|selected|chosen|official|main|verified|primary)\s+)*(?:product|result|item|listing|video|movie|article|song|track|stream|content|website|site|webpage|page|link|portal|entry|it|that|this|them)$/i.test(candidate);
+        if (!isGeneric) {
+          explicitTarget = candidate;
+          isExplicitTarget = true;
+          isMostRelevant = false;
+          hasProductOpen = true;
+          productTarget = explicitTarget;
+        } else {
+          isMostRelevant = /\bmost\s+relevant\b/i.test(candidate);
+          isExplicitTarget = false;
+          hasProductOpen = true;
+          productTarget = candidate;
+        }
+      } else if (/\bopen\s+(?:it|that|the\s+product|the\s+result|the\s+video|the\s+item|the\s+website|the\s+site|the\s+page|the\s+link)\b/i.test(searchTaskText)) {
+        hasProductOpen = true;
+        productTarget = "most relevant product";
+        isMostRelevant = false;
+        isExplicitTarget = false;
+      }
+    }
 
     let trailingTarget = null;
     // Trailing pattern A: "open ..., and then find the Add to Cart button, and click it"
-    const trailingFindClickMatch = searchTaskText.match(/(?:open\s+(?:the\s+)?(?:(?:most\s+relevant|actual|first|top|selected|chosen)\s+)*(?:product|result|item|listing|video|movie|article|song|track|stream|content|it)|open\s+it)\s*(?:,\s*|\s+)(?:and\s+)?(?:then\s+)?(?:find|locate|search\s+for)\s+(?:the\s+)?(.+?)\s*(?:,\s*|\s+)(?:and\s+)?(?:then\s+)?(?:click|press|tap)\s+(?:on\s+)?(?:it|that|this)\b/i);
+    const trailingFindClickMatch = searchTaskText.match(/(?:open\s+(?:the\s+)?(?:(?:most\s+relevant|actual|first|top|selected|chosen|official|main|verified|primary)\s+)*(?:[a-zA-Z0-9_\-]+\s+)?(?:product|result|item|listing|video|movie|article|song|track|stream|content|website|site|webpage|page|link|portal|entry|it)|open\s+it)\s*(?:,\s*|\s+)(?:and\s+)?(?:then\s+)?(?:find|locate|search\s+for)\s+(?:the\s+)?(.+?)\s*(?:,\s*|\s+)(?:and\s+)?(?:then\s+)?(?:click|press|tap)\s+(?:on\s+)?(?:it|that|this)\b/i);
     if (trailingFindClickMatch) {
       trailingTarget = trailingFindClickMatch[1].trim();
     } else {
       // Trailing pattern B: "open ..., and click [the] <TARGET> [button]"
-      const trailingClickMatch = searchTaskText.match(/(?:open\s+(?:the\s+)?(?:(?:most\s+relevant|actual|first|top|selected|chosen)\s+)*(?:product|result|item|listing|video|movie|article|song|track|stream|content|it)|open\s+it)\s*(?:,\s*|\s+)(?:and\s+)?(?:then\s+)?(?:click|press|tap)\s+(?:on\s+)?(?:the\s+)?([a-zA-Z0-9_\-\s]+?)(?:\s+button)?$/i);
+      const trailingClickMatch = searchTaskText.match(/(?:open\s+(?:the\s+)?(?:(?:most\s+relevant|actual|first|top|selected|chosen|official|main|verified|primary)\s+)*(?:[a-zA-Z0-9_\-]+\s+)?(?:product|result|item|listing|video|movie|article|song|track|stream|content|website|site|webpage|page|link|portal|entry|it)|open\s+it)\s*(?:,\s*|\s+)(?:and\s+)?(?:then\s+)?(?:click|press|tap)\s+(?:on\s+)?(?:the\s+)?([a-zA-Z0-9_\-\s]+?)(?:\s+button)?$/i);
       if (trailingClickMatch) {
         trailingTarget = trailingClickMatch[1].trim();
       } else {
@@ -300,7 +339,10 @@
         type: "CLICK",
         targetHint: productTarget,
         query: query,
-        isProductSelection: true
+        isProductSelection: true,
+        isExplicitTarget: isExplicitTarget,
+        explicitTarget: explicitTarget || null,
+        isMostRelevant: isMostRelevant
       });
     }
 
@@ -335,8 +377,15 @@
     // parse each stage independently and concatenate their steps in order.
     const searchOccurrences = (rawTask.match(/\bsearch\b/gi) || []).length;
     if (searchOccurrences >= 2) {
-      const multiSearchSplitPattern = /(?:,\s*then|\s+then|\s*;\s*then|\s*,\s*and\s+then|\s+and\s+then|\s+after\s+opening\s+(?:it|the\s+result|the\s+product|that|the\s+video|the\s+item))\s+(?=(?:find|locate|go\s+to|click|search|on\b|in\b))/i;
-      const searchParts = rawTask.trim().split(multiSearchSplitPattern);
+      // Stage boundary occurs after an open/click/select/submit result clause when followed by a new search/find-search-box phase:
+      const multiSearchSplitPattern = /(?<=(?:open|click|select|view)\s+(?:on\s+)?(?:the\s+)?(?:(?:most\s+relevant|actual|first|top|selected|chosen|official|main|verified|primary)\s+)*(?:[a-zA-Z0-9_\-]+\s+)?(?:product|result|item|listing|video|movie|article|song|track|stream|content|website|site|webpage|page|link|portal|entry|it|that|them)|(?:submit\s+search|submit))\s*(?:,\s*(?:then|and\s+then|and)?|\s+(?:then|and\s+then|and)|\s*;\s*(?:then)?|\.\s*|\s+after\s+opening\s+[^,;]+,?\s*)\s*(?=(?:(?:find|locate|go\s+to|click)\s+(?:on\s+)?(?:the\s+)?(?:[a-zA-Z0-9_\-]+\s+)?(?:search\s+(?:box|input|field|bar|area)|search)\b|search\b))/i;
+
+      let searchParts = rawTask.trim().split(multiSearchSplitPattern);
+      if (searchParts.length <= 1) {
+        const legacyPattern = /(?:,\s*then|\s+then|\s*;\s*then|\s*,\s*and\s+then|\s+and\s+then|\s+after\s+opening\s+(?:it|the\s+result|the\s+product|that|the\s+video|the\s+item))\s+(?=(?:find|locate|go\s+to|click|search|on\b|in\b))/i;
+        searchParts = rawTask.trim().split(legacyPattern);
+      }
+
       if (searchParts.length > 1 && searchParts.every((p) => /\bsearch\b/i.test(p))) {
         let combinedSteps = [];
         let allValid = true;
@@ -608,15 +657,104 @@
 
     const sanitizedPlan = [];
     const localValues = {};
+    const goals = [];
+    let currentGoal = null;
 
     let fillStepIndex = 0;
     steps.forEach((step, idx) => {
       step.stepId = idx;
+
+      // Group low-level action steps into user-facing subgoals
+      if (step.type === "CLICK" && (step.targetHint === "search box" || step.legacyTarget === "SEARCH_INPUT")) {
+        currentGoal = {
+          id: goals.length + 1,
+          title: "Find search box",
+          type: "LOCATE_SEARCH",
+          stepIds: [idx]
+        };
+        goals.push(currentGoal);
+      } else if (step.type === "FILL" && step.fieldHint === "search") {
+        currentGoal = {
+          id: goals.length + 1,
+          title: `Search for '${step.value || "query"}'`,
+          type: "SEARCH",
+          query: step.value || null,
+          stepIds: [idx]
+        };
+        goals.push(currentGoal);
+      } else if (step.type === "SUBMIT") {
+        if (currentGoal && currentGoal.type === "SEARCH") {
+          currentGoal.stepIds.push(idx);
+        } else {
+          currentGoal = {
+            id: goals.length + 1,
+            title: `Submit search${step.query ? " for '" + step.query + "'" : ""}`,
+            type: "SEARCH",
+            query: step.query || null,
+            stepIds: [idx]
+          };
+          goals.push(currentGoal);
+        }
+      } else if (step.type === "CLICK" && (step.isProductSelection || /result|product|item|listing|video|movie|article|website|site|webpage|page|link|portal/i.test(step.targetHint || ""))) {
+        const goalTarget = step.isExplicitTarget && step.explicitTarget ? step.explicitTarget : (step.targetHint || "relevant result");
+        currentGoal = {
+          id: goals.length + 1,
+          title: `Open ${goalTarget}`,
+          type: "OPEN_RESULT",
+          target: goalTarget,
+          stepIds: [idx]
+        };
+        goals.push(currentGoal);
+      } else if (step.type === "FILL_FORM") {
+        currentGoal = {
+          id: goals.length + 1,
+          title: "Fill all form fields",
+          type: "FILL_FORM",
+          stepIds: [idx]
+        };
+        goals.push(currentGoal);
+      } else if (step.type === "FILL") {
+        currentGoal = {
+          id: goals.length + 1,
+          title: `Fill ${step.fieldHint || "form field"}`,
+          type: "FILL_FIELD",
+          stepIds: [idx]
+        };
+        goals.push(currentGoal);
+      } else if (step.type === "CLICK") {
+        currentGoal = {
+          id: goals.length + 1,
+          title: `Click ${step.targetHint || "element"}`,
+          type: "CLICK",
+          target: step.targetHint || "element",
+          stepIds: [idx]
+        };
+        goals.push(currentGoal);
+      } else if (step.type === "SCROLL") {
+        currentGoal = {
+          id: goals.length + 1,
+          title: `Scroll down ${step.amount || DEFAULT_SCROLL_AMOUNT}px`,
+          type: "SCROLL",
+          stepIds: [idx]
+        };
+        goals.push(currentGoal);
+      } else {
+        currentGoal = {
+          id: goals.length + 1,
+          title: `Action step ${idx + 1}`,
+          type: "GENERIC",
+          stepIds: [idx]
+        };
+        goals.push(currentGoal);
+      }
+      step.goalId = currentGoal.id;
+
       if (step.type === "FILL_FORM") {
         sanitizedPlan.push({
           type: "FILL_FORM",
           fieldHint: step.fieldHint || "all form fields",
-          stepId: idx
+          stepId: idx,
+          goalId: step.goalId
         });
         localValues[idx] = "[FORM_PROFILE_DATA]";
         localValues["form_profile"] = step.profileSource || "form-profile.json";
@@ -625,11 +763,13 @@
         sanitizedPlan.push({
           type: "FILL",
           fieldHint: step.fieldHint,
-          stepId: idx
+          stepId: idx,
+          goalId: step.goalId
         });
         // Retain literal values strictly in local in-memory structure
         localValues[idx] = step.value;
         localValues[`fill_${fillStepIndex}`] = step.value;
+        localValues[`step_${idx}`] = step.value;
         fillStepIndex++;
         const normHint = (step.fieldHint || "").toLowerCase().trim();
         if (normHint) {
@@ -639,31 +779,36 @@
         sanitizedPlan.push({
           type: "SUBMIT",
           targetHint: step.targetHint || "search",
-          stepId: idx
+          stepId: idx,
+          goalId: step.goalId
         });
         if (step.query) {
           localValues["search_query"] = step.query;
           localValues[idx] = step.query;
+          localValues[`step_${idx}`] = step.query;
         }
       } else if (step.type === "CLICK") {
         sanitizedPlan.push({
           type: "CLICK",
           targetHint: step.targetHint,
           legacyTarget: step.legacyTarget || null,
-          stepId: idx
+          stepId: idx,
+          goalId: step.goalId
         });
         if (step.query) {
           localValues["search_query"] = step.query;
+          localValues[`step_${idx}`] = step.query;
         }
       } else if (step.type === "SCROLL") {
         sanitizedPlan.push({
           type: "SCROLL",
           target: step.target || "PAGE",
           amount: step.amount || DEFAULT_SCROLL_AMOUNT,
-          stepId: idx
+          stepId: idx,
+          goalId: step.goalId
         });
       } else {
-        sanitizedPlan.push({ type: "NONE", stepId: idx });
+        sanitizedPlan.push({ type: "NONE", stepId: idx, goalId: step.goalId });
       }
     });
 
@@ -675,6 +820,7 @@
     return {
       intent: primaryIntent,
       steps: steps,
+      goals: goals,
       sanitizedPlan: sanitizedPlan,
       localValues: localValues,
       isMultiStep: isMultiStep

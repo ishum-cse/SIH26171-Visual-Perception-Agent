@@ -338,7 +338,7 @@ document.addEventListener("DOMContentLoaded", () => {
   };
 
   // Milestone 14 & 16 Constants (Bounded Loop with safe ceiling)
-  const MAX_AGENT_STEPS = 10;
+  const MAX_AGENT_STEPS = 15;
   const PIXEL_CHANGE_THRESHOLD = 30;
   const ACTION_VERIFICATION_DELAY_MS = 600;
 
@@ -353,7 +353,9 @@ document.addEventListener("DOMContentLoaded", () => {
     REPERCEIVE: "REPERCEIVE",
     VERIFY: "VERIFY",
     CONTINUE: "CONTINUE",
-    COMPLETE: "COMPLETE"
+    COMPLETE: "COMPLETE",
+    HALTED: "HALTED",
+    ERROR: "ERROR"
   });
 
   let currentAgentState = AGENT_STATES.PERCEIVE;
@@ -1500,12 +1502,35 @@ document.addEventListener("DOMContentLoaded", () => {
         }
         console.log("[SIH26171] Reasoning plan created");
 
+        // Persistent original user task (never overwritten or truncated)
+        const originalUserTask = task;
+        let taskGoals = (reasoningPlan && Array.isArray(reasoningPlan.goals) && reasoningPlan.goals.length > 0)
+          ? reasoningPlan.goals
+          : (parsedTask && Array.isArray(parsedTask.goals) ? parsedTask.goals : []);
+        let completedGoals = [];
+        let remainingGoals = [...taskGoals];
+
         // Render transparent task understanding and structured plan in UI
         if (plannerTaskUnderstanding) {
-          plannerTaskUnderstanding.textContent = reasoningPlan ? reasoningPlan.taskUnderstanding : task;
+          plannerTaskUnderstanding.textContent = reasoningPlan ? reasoningPlan.taskUnderstanding : originalUserTask;
         }
         if (plannerExecutionPlan) {
-          if (reasoningPlan && reasoningPlan.steps && reasoningPlan.steps.length > 0) {
+          if (taskGoals && taskGoals.length > 0) {
+            let planHtml = `<div style="margin-bottom: 4px; font-weight: bold; color: #1e3a8a;">Ordered Subgoals (${taskGoals.length}):</div>`;
+            taskGoals.forEach((g) => {
+              planHtml += `<div style="padding: 1px 0 1px 6px; font-size: 10px; color: #1e293b;">&bull; <strong>Goal ${g.id}:</strong> ${escapeHtml(g.title)}</div>`;
+            });
+            planHtml += `<div style="margin: 4px 0 2px; font-weight: bold; color: #1e3a8a;">Action Steps (${reasoningPlan ? reasoningPlan.steps.length : parsedTask.steps.length}):</div>`;
+            const planSteps = (reasoningPlan && reasoningPlan.steps) ? reasoningPlan.steps : parsedTask.steps;
+            planHtml += planSteps.map((st, i) => {
+              const riskColor = (st.risk === "HIGH" || st.risk === "CRITICAL") ? "#dc2626" : ((st.risk === "MEDIUM") ? "#d97706" : "#2563eb");
+              const approvalBadge = st.requiresApproval
+                ? `<span style="background:#fee2e2;color:#dc2626;padding:1px 5px;border-radius:3px;font-size:9px;font-weight:bold;margin-left:4px;">APPROVAL REQ</span>`
+                : `<span style="background:#f3f4f6;color:#4b5563;padding:1px 5px;border-radius:3px;font-size:9px;margin-left:4px;">AUTO</span>`;
+              return `<div style="padding:1px 0 1px 6px;"><strong>${i + 1}.</strong> ${escapeHtml(st.type)} &rarr; <strong>${escapeHtml(st.target || st.targetHint || st.fieldHint || "target")}</strong> <span style="color:${riskColor};font-weight:bold;font-size:10px;">[${st.risk || "LOW"}]</span>${approvalBadge}</div>`;
+            }).join("");
+            plannerExecutionPlan.innerHTML = planHtml;
+          } else if (reasoningPlan && reasoningPlan.steps && reasoningPlan.steps.length > 0) {
             plannerExecutionPlan.innerHTML = reasoningPlan.steps.map((st, i) => {
               const riskColor = (st.risk === "HIGH" || st.risk === "CRITICAL") ? "#dc2626" : ((st.risk === "MEDIUM") ? "#d97706" : "#2563eb");
               const approvalBadge = st.requiresApproval
@@ -1569,7 +1594,7 @@ document.addEventListener("DOMContentLoaded", () => {
         updateCurrentActionCard({
           stepText: isPlannedTask ? `STEP 1 / ${totalPlannedSteps}` : `STEP 1 / ${MAX_AGENT_STEPS}`,
           action: "OBSERVE",
-          target: task,
+          target: originalUserTask,
           value: "",
           grounding: "Local Observation",
           risk: "LOW",
@@ -1805,10 +1830,14 @@ document.addEventListener("DOMContentLoaded", () => {
             ? plannedSteps[currentStep - 1]
             : null;
 
-          setAgentState(AGENT_STATES.PLAN, `Planning step ${currentStep}...`);
+          let activeGoal = taskGoals.find((g) => g.stepIds && g.stepIds.includes(currentStep - 1)) || null;
 
           if (currentStepPlan && currentStepPlan.type === "CLICK") {
-            const isSearchResultSelection = !!(currentStepPlan.query || (currentStepPlan.targetHint && currentStepPlan.targetHint.includes("relevant result")));
+            const isSearchResultSelection = !!(
+              currentStepPlan.query ||
+              currentStepPlan.isProductSelection ||
+              (currentStepPlan.targetHint && /result|product|item|listing|video|movie|article|website|site|webpage|page|link/i.test(currentStepPlan.targetHint))
+            );
             if (isSearchResultSelection) {
               setAgentState(AGENT_STATES.VERIFY, "Verifying search results state...");
               const searchState = await verifySearchResultsStateLocally(activeTab.id, currentStepPlan.query);
@@ -1819,7 +1848,7 @@ document.addEventListener("DOMContentLoaded", () => {
             }
           }
 
-          let taskToSend = task;
+          let taskToSend = originalUserTask;
           let stepFieldPlan = [];
           if (currentStepPlan) {
             if (currentStepPlan.type === "FILL_FORM") {
@@ -1842,9 +1871,15 @@ document.addEventListener("DOMContentLoaded", () => {
                 : "Submit search";
               stepFieldPlan = [];
             } else if (currentStepPlan.type === "CLICK") {
-              const isSearchResultSelection = !!(currentStepPlan.query || (currentStepPlan.targetHint && currentStepPlan.targetHint.includes("relevant result")));
-              if (isSearchResultSelection && currentStepPlan.query) {
-                taskToSend = `Select and click the most relevant search result for '${currentStepPlan.query}' (prefer the actual device/product, do NOT select accessories like cases, covers, or screen protectors)`;
+              const isSearchResultSelection = !!(
+                currentStepPlan.query ||
+                currentStepPlan.isProductSelection ||
+                (currentStepPlan.targetHint && /result|product|item|listing|video|movie|article|website|site|webpage|page|link/i.test(currentStepPlan.targetHint))
+              );
+              if (currentStepPlan.isExplicitTarget && currentStepPlan.explicitTarget) {
+                taskToSend = `Click the result called "${currentStepPlan.explicitTarget}"`;
+              } else if (isSearchResultSelection && currentStepPlan.query) {
+                taskToSend = `Select and click the most relevant search result for '${currentStepPlan.query}' (prefer the primary matching listing/website/result, avoid ads or unrelated suggestions)`;
               } else {
                 taskToSend = currentStepPlan.targetHint
                   ? `Click ${currentStepPlan.targetHint}`
@@ -1877,6 +1912,8 @@ document.addEventListener("DOMContentLoaded", () => {
               height: el.height
             })),
             fieldPlan: stepFieldPlan,
+            currentGoal: activeGoal ? activeGoal.title : taskToSend,
+            remainingGoalsCount: remainingGoals.length,
             sceneClassification: latestVisionResult ? {
               classIndex: latestVisionResult.classIndex,
               confidence: latestVisionResult.confidence
@@ -1884,7 +1921,8 @@ document.addEventListener("DOMContentLoaded", () => {
             sensitiveRegionCount: latestSensitiveRegions ? latestSensitiveRegions.length : 0,
             ocrTextRegionCount: latestOcrWordCount,
             totalRedactedRegionCount: latestMergedRegions ? latestMergedRegions.length : 0,
-            loopStep: currentStep
+            loopStep: currentStep,
+            totalPlannedSteps: totalPlannedSteps
           };
 
           const privacyMetadata = {
@@ -2030,6 +2068,12 @@ document.addEventListener("DOMContentLoaded", () => {
               const isCompatibleFill = agentAction && agentAction.action === "FILL" && agentAction.targetIndex !== undefined;
               // CRITICAL QUERY RULE: Authoritative explicit value extraction takes precedence
               let authoritativeVal = (currentStepPlan && currentStepPlan.value) ? currentStepPlan.value : null;
+              if (!authoritativeVal && localValuesMap && localValuesMap[currentStep - 1] !== undefined) {
+                authoritativeVal = localValuesMap[currentStep - 1];
+              }
+              if (!authoritativeVal && localValuesMap && localValuesMap[`step_${currentStep - 1}`] !== undefined) {
+                authoritativeVal = localValuesMap[`step_${currentStep - 1}`];
+              }
               if (!authoritativeVal && window.SIHTaskParser && typeof window.SIHTaskParser.extractTaskQueryOrValue === "function") {
                 authoritativeVal = window.SIHTaskParser.extractTaskQueryOrValue(task);
               }
@@ -2130,7 +2174,13 @@ document.addEventListener("DOMContentLoaded", () => {
                 groundingMethod: "search-submission-rule"
               };
             } else if (plannedType === "CLICK") {
-              const isSearchResultSelection = !!(currentStepPlan.query || (currentStepPlan.targetHint && (currentStepPlan.targetHint.includes("relevant result") || currentStepPlan.targetHint.includes("product") || currentStepPlan.targetHint.includes("first result"))));
+              const isSearchResultSelection = !!(
+                currentStepPlan.query ||
+                currentStepPlan.isProductSelection ||
+                (currentStepPlan.targetHint && /result|product|item|listing|video|movie|article|website|site|webpage|page|link/i.test(currentStepPlan.targetHint))
+              );
+              const isExplicitTarget = !!(currentStepPlan.isExplicitTarget);
+              const explicitTargetVal = (currentStepPlan.explicitTarget || (isExplicitTarget ? currentStepPlan.targetHint : null) || "").toLowerCase().trim();
               const queryNorm = (currentStepPlan.query || "").toLowerCase().trim();
               const queryTokens = queryNorm.split(/\s+/).filter(Boolean);
 
@@ -2142,6 +2192,12 @@ document.addEventListener("DOMContentLoaded", () => {
               ];
 
               let isCompatibleClick = agentAction && agentAction.action === "CLICK";
+              if (isCompatibleClick && isExplicitTarget && explicitTargetVal) {
+                const candLabel = (agentAction.targetLabel || agentAction.target || "").toLowerCase();
+                if (!candLabel.includes(explicitTargetVal)) {
+                  isCompatibleClick = false; // Discard backend action if it doesn't match the explicit target
+                }
+              }
               if (isCompatibleClick && isSearchResultSelection) {
                 const candLabel = (agentAction.targetLabel || agentAction.target || "").toLowerCase();
                 if (isGenericNavigationOrHomepageTarget(candLabel)) {
@@ -2173,6 +2229,22 @@ document.addEventListener("DOMContentLoaded", () => {
                   if (!["button", "link", "input", "element"].includes(elType)) return 0;
                   const labelNorm = normalize(el.label);
 
+                  // STRICT TARGET VALIDATION: If user specified an explicit named target, verify strictly against it
+                  if (isExplicitTarget && explicitTargetVal) {
+                    if (isGenericNavigationOrHomepageTarget(el.label)) return 0;
+                    if (elType === "input" && (el.semanticTag === "SEARCH_INPUT" || labelNorm.includes("search"))) return 0;
+
+                    if (labelNorm === explicitTargetVal) return 1.0;
+                    if (labelNorm.includes(explicitTargetVal)) return 0.95;
+
+                    const explicitTokens = explicitTargetVal.split(/\s+/).filter((t) => t.length > 2 && !["result", "called", "named", "titled", "product", "item"].includes(t));
+                    if (explicitTokens.length > 0 && explicitTokens.every((t) => labelNorm.includes(t))) {
+                      return 0.90;
+                    }
+                    // NEVER match solely on search query tokens when an explicit target is requested!
+                    return 0;
+                  }
+
                   if (isSearchResultSelection) {
                     // Anti-homepage filter: Never click navigation, header, or footer links
                     if (isGenericNavigationOrHomepageTarget(el.label)) return 0;
@@ -2185,14 +2257,16 @@ document.addEventListener("DOMContentLoaded", () => {
                       return labelNorm.includes(term) && !queryNorm.includes(term);
                     });
 
-                    // Evaluate relevance against query
-                    if (queryTokens.length > 0 && (elType === "link" || elType === "button" || elType === "element")) {
+                    // Evaluate relevance against query or targetHint tokens
+                    const hintTokens = (currentStepPlan.targetHint || "").toLowerCase().split(/\s+/).filter(t => !["official", "website", "the", "most", "relevant", "result", "page", "site", "webpage", "link"].includes(t));
+                    const searchTokens = [...new Set([...queryTokens, ...hintTokens])];
+                    if (searchTokens.length > 0 && (elType === "link" || elType === "button" || elType === "element")) {
                       let matchCount = 0;
-                      for (const t of queryTokens) {
+                      for (const t of searchTokens) {
                         if (labelNorm.includes(t)) matchCount++;
                       }
                       if (matchCount > 0) {
-                        let relScore = 0.7 + (matchCount / queryTokens.length) * 0.25;
+                        let relScore = 0.7 + (matchCount / searchTokens.length) * 0.25;
                         if (queryNorm && labelNorm.includes(queryNorm)) {
                           relScore += 0.05; // Exact query phrase bonus
                         }
@@ -2221,8 +2295,8 @@ document.addEventListener("DOMContentLoaded", () => {
                       if (elType === "button" || el.semanticTag?.includes("BUTTON")) score += 0.1;
                       else score *= 0.5;
                     }
-                    if (rawHint.includes("box") || rawHint.includes("input") || rawHint.includes("field")) {
-                      if (elType === "input" || elType === "textarea") score += 0.1;
+                    if (rawHint.includes("box") || rawHint.includes("input") || rawHint.includes("field") || rawHint.includes("search")) {
+                      if (elType === "input" || elType === "textarea" || el.semanticTag === "SEARCH_INPUT") score += 0.15;
                       else score *= 0.5;
                     }
                   }
@@ -2287,7 +2361,13 @@ document.addEventListener("DOMContentLoaded", () => {
                   }
 
                   if (!agentAction || agentAction.action !== "CLICK") {
-                    if (currentStepPlan.legacyTarget) {
+                    if (isExplicitTarget) {
+                      agentAction = {
+                        action: "NONE",
+                        target: null,
+                        reason: `Target not found: ${currentStepPlan.explicitTarget || currentStepPlan.targetHint}`
+                      };
+                    } else if (currentStepPlan.legacyTarget) {
                       agentAction = {
                         action: "CLICK",
                         target: currentStepPlan.legacyTarget,
@@ -2435,27 +2515,91 @@ document.addEventListener("DOMContentLoaded", () => {
             break;
           }
 
-          // Step 9: If agent returns NONE or no target, terminate loop gracefully
+          // Step 9: If agent returns NONE or no target, check if task is planned and incomplete
           if (!agentAction || agentAction.action === "NONE" || (!agentAction.target && agentAction.targetIndex === undefined)) {
-            if (agentSafetyStatus) agentSafetyStatus.textContent = "PASSED (No-op action safely handled)";
-            if (agentExecutionStatus) agentExecutionStatus.textContent = "Task complete (No further action needed)";
-            if (executionOutput) executionOutput.value = "Task complete (Action is NONE)";
-            if (agentVerificationText) {
-              agentVerificationText.textContent = "Verification: Goal reached or no actionable target.";
-              agentVerificationText.style.color = "#2e7d32";
+            // If this is a planned multi-step task and steps remain, try a brief page stabilization re-perception before halting
+            if (isPlannedTask && currentStep <= totalPlannedSteps) {
+              appendPlannerTrace(`Step ${currentStep}: Grounding pending. Awaiting page element stabilization...`);
+              await new Promise((r) => setTimeout(r, 600));
+              const retryPage = await new Promise((resolveRetry) => {
+                chrome.tabs.sendMessage(activeTab.id, { action: "getPageInfo" }, (resp) => {
+                  resolveRetry((resp && resp.visualElements) ? resp.visualElements : null);
+                });
+              });
+              if (retryPage && retryPage.length > 0) {
+                latestVisualElements = retryPage;
+                // Check if currentStepPlan can now be grounded
+                const planTargetHint = (currentStepPlan.fieldHint || currentStepPlan.targetHint || "").toLowerCase().trim();
+                let retryIdx = -1;
+                let retryScore = 0;
+                retryPage.forEach((el, idx) => {
+                  const lbl = (el.label || "").toLowerCase();
+                  if (planTargetHint && lbl.includes(planTargetHint)) {
+                    if (lbl.length > retryScore) {
+                      retryScore = lbl.length;
+                      retryIdx = idx;
+                    }
+                  }
+                });
+                if (retryIdx >= 0) {
+                  const foundEl = retryPage[retryIdx];
+                  agentAction = {
+                    action: currentStepPlan.type || "CLICK",
+                    target: foundEl.label,
+                    targetIndex: retryIdx,
+                    targetType: foundEl.type,
+                    targetLabel: foundEl.label,
+                    groundingScore: 0.85,
+                    groundingMethod: "page-stabilized-grounding"
+                  };
+                  appendPlannerTrace(`Target grounded after stabilization: '${foundEl.label}'.`);
+                }
+              }
             }
 
-            executionTraceHistory.push({
-              step: currentStep,
-              requestId,
-              action: agentAction,
-              executed: false,
-              status: "completed",
-              executionResult: "Skipped (Action is NONE)",
-              verification: "Goal completed"
-            });
-            renderTraceHistory();
-            break;
+            // If still NONE or no target, terminate safely without falsely claiming completion
+            if (!agentAction || agentAction.action === "NONE" || (!agentAction.target && agentAction.targetIndex === undefined)) {
+              const targetName = currentStepPlan?.explicitTarget || currentStepPlan?.targetHint || currentStepPlan?.fieldHint || "element";
+              const isExplicit = !!(currentStepPlan?.isExplicitTarget);
+
+              if (isExplicit) {
+                if (agentSafetyStatus) agentSafetyStatus.textContent = "TARGET NOT FOUND / ACTION BLOCKED";
+                if (agentExecutionStatus) agentExecutionStatus.textContent = `Target not found: ${targetName}`;
+                if (executionOutput) executionOutput.value = `Target not found: ${targetName}`;
+                if (agentVerificationText) {
+                  agentVerificationText.textContent = `Verification: Explicit target '${targetName}' not found on page.`;
+                  agentVerificationText.style.color = "#c62828";
+                }
+              } else if (isPlannedTask && currentStepPlan && currentStepPlan.type !== "NONE") {
+                if (agentSafetyStatus) agentSafetyStatus.textContent = "HALTED (Target not found on page)";
+                if (agentExecutionStatus) agentExecutionStatus.textContent = `Halted at step ${currentStep} of ${totalPlannedSteps}: Target '${targetName}' not visible`;
+                if (executionOutput) executionOutput.value = `Halted at step ${currentStep}: Target not visible`;
+                if (agentVerificationText) {
+                  agentVerificationText.textContent = `Verification: Target not visible on current page.`;
+                  agentVerificationText.style.color = "#c62828";
+                }
+              } else {
+                if (agentSafetyStatus) agentSafetyStatus.textContent = "PASSED (No-op action safely handled)";
+                if (agentExecutionStatus) agentExecutionStatus.textContent = "Task complete (No further action needed)";
+                if (executionOutput) executionOutput.value = "Task complete (Action is NONE)";
+                if (agentVerificationText) {
+                  agentVerificationText.textContent = "Verification: Goal reached or no actionable target.";
+                  agentVerificationText.style.color = "#2e7d32";
+                }
+              }
+
+              executionTraceHistory.push({
+                step: currentStep,
+                requestId,
+                action: agentAction,
+                executed: false,
+                status: isExplicit ? "blocked" : (isPlannedTask ? "unresolved" : "completed"),
+                executionResult: isExplicit ? `Target not found: ${targetName}` : (isPlannedTask ? `Halted: Target '${targetName}' not visible on page` : "Skipped (Action is NONE)"),
+                verification: isExplicit ? "TARGET NOT FOUND / ACTION BLOCKED" : (isPlannedTask ? "Step unresolved" : "Goal completed")
+              });
+              renderTraceHistory();
+              break;
+            }
           }
 
           // Step 10: Safe Execution via Local Allowlist in content.js (Milestones 5, 6, 14, 15, 16 & 17)
@@ -3024,6 +3168,28 @@ document.addEventListener("DOMContentLoaded", () => {
               stepPlanForCheck.completed = true;
               stepPlanForCheck.verified = true;
             }
+            if (plannedSteps && plannedSteps[currentStep - 1]) {
+              plannedSteps[currentStep - 1].completed = true;
+              plannedSteps[currentStep - 1].verified = true;
+            }
+
+            // Update goal completion tracking
+            if (stepPlanForCheck && stepPlanForCheck.goalId && Array.isArray(taskGoals)) {
+              const currentGoal = taskGoals.find((g) => g.id === stepPlanForCheck.goalId);
+              if (currentGoal) {
+                // Check if all steps in this goal are completed
+                const goalSteps = (reasoningPlan?.steps || plannedSteps || []).filter((s) => s.goalId === currentGoal.id);
+                const allGoalStepsDone = goalSteps.length === 0 || goalSteps.every((s) => s.completed || s.verified);
+                if (allGoalStepsDone && !currentGoal.completed) {
+                  currentGoal.completed = true;
+                  if (!completedGoals.includes(currentGoal.id)) {
+                    completedGoals.push(currentGoal.id);
+                  }
+                  remainingGoals = taskGoals.filter((g) => !completedGoals.includes(g.id));
+                  appendPlannerTrace(`Goal ${currentGoal.id} [${currentGoal.type}] completed ✓ (${remainingGoals.length} remaining).`);
+                }
+              }
+            }
           }
 
           // Step 11: Post-Action Verification via Screen-Change Detection
@@ -3033,7 +3199,19 @@ document.addEventListener("DOMContentLoaded", () => {
             await waitForSearchResultsStabilization(activeTab.id, 5000);
             await waitForTabReady(activeTab.id, 6000);
             setAgentState(AGENT_STATES.REPERCEIVE, "Perceiving search results...");
-          } else if (agentAction.action === "CLICK" || agentAction.action === "FILL" || agentAction.action === "FILL_FORM") {
+          } else if (agentAction.action === "CLICK") {
+            // If clicking search result or navigation link, allow time for new page load
+            const isNavClick = (currentStepPlan && currentStepPlan.isSearchResult) ||
+              /\b(result|website|site|link|video|product|listing|portal)\b/i.test(agentAction.targetLabel || agentAction.target || "");
+            if (isNavClick) {
+              setAgentState(AGENT_STATES.WAIT, "Navigating to selected target...");
+              await new Promise((r) => setTimeout(r, 1200));
+            }
+            await waitForTabReady(activeTab.id, 6000);
+            if (isNavClick) {
+              setAgentState(AGENT_STATES.REPERCEIVE, "Observing navigated page...");
+            }
+          } else if (agentAction.action === "FILL" || agentAction.action === "FILL_FORM") {
             await waitForTabReady(activeTab.id, 6000);
           } else {
             await new Promise((r) => setTimeout(r, ACTION_VERIFICATION_DELAY_MS));
@@ -3165,13 +3343,62 @@ document.addEventListener("DOMContentLoaded", () => {
           const shouldContinue = executedThisStep && (isPlannedTask ? hasMoreSteps : (screenActuallyChanged && currentStep < MAX_AGENT_STEPS));
 
           if (!shouldContinue) {
-            setAgentState(AGENT_STATES.COMPLETE, `Completed at Step ${currentStep}`);
-            setLiveAgentStatus("ready", "COMPLETED");
-            if (pipelineStepCounter) {
-              pipelineStepCounter.textContent = `Completed (${isPlannedTask ? totalPlannedSteps : currentStep} steps)`;
+            // Check if overall task is truly completed
+            let isOverallDone = false;
+            if (isPlannedTask && totalPlannedSteps > 0) {
+              const allStepsExecuted = currentStep >= totalPlannedSteps && executedThisStep;
+              const hasNoFailedOrBlockedTraces = !executionTraceHistory.some(
+                (t) => !t.executed || t.status === "blocked" || t.status === "rejected" || t.status === "unresolved" || t.status === "cancelled_by_user"
+              );
+              const allPlanStepsDone = (plannedSteps && plannedSteps.every((s) => s.completed || s.verified)) ||
+                (reasoningPlan?.steps && reasoningPlan.steps.every((s) => s.completed || s.verified));
+
+              isOverallDone = allStepsExecuted && hasNoFailedOrBlockedTraces && (allPlanStepsDone || executionTraceHistory.length >= totalPlannedSteps);
+            } else {
+              isOverallDone = executedThisStep && !executionTraceHistory.some((t) => !t.executed);
             }
-            if (agentStepText) {
-              agentStepText.textContent = `Completed at Step ${currentStep} of ${isPlannedTask ? totalPlannedSteps : MAX_AGENT_STEPS}`;
+
+            if (currentStep >= MAX_AGENT_STEPS && !isOverallDone) {
+              setAgentState(AGENT_STATES.HALTED || "HALTED", `Loop safety limit reached (${MAX_AGENT_STEPS} steps). Execution stopped.`);
+              setLiveAgentStatus("error", "LIMIT REACHED");
+              if (pipelineStepCounter) {
+                pipelineStepCounter.textContent = `Limit Reached (${MAX_AGENT_STEPS} steps)`;
+              }
+              if (agentStepText) {
+                agentStepText.textContent = `Stopped at Step ${currentStep} of ${MAX_AGENT_STEPS} (Safety limit reached)`;
+              }
+              if (agentExecutionStatus) {
+                agentExecutionStatus.textContent = `Stopped: Execution safety limit (${MAX_AGENT_STEPS} steps) reached.`;
+              }
+            } else if (isOverallDone) {
+              setAgentState(AGENT_STATES.COMPLETE, `Completed at Step ${currentStep}`);
+              setLiveAgentStatus("ready", "COMPLETED");
+              if (pipelineStepCounter) {
+                pipelineStepCounter.textContent = `Completed (${isPlannedTask ? totalPlannedSteps : currentStep} steps)`;
+              }
+              if (agentStepText) {
+                agentStepText.textContent = `Completed at Step ${currentStep} of ${isPlannedTask ? totalPlannedSteps : MAX_AGENT_STEPS}`;
+              }
+              if (agentExecutionStatus) {
+                agentExecutionStatus.textContent = `Task complete (${isPlannedTask ? totalPlannedSteps : currentStep} steps executed successfully)`;
+              }
+            } else {
+              setAgentState(AGENT_STATES.HALTED || "HALTED", `Incomplete at Step ${currentStep}`);
+              setLiveAgentStatus("error", "INCOMPLETE");
+              if (pipelineStepCounter) {
+                pipelineStepCounter.textContent = `Halted (${currentStep} of ${isPlannedTask ? totalPlannedSteps : MAX_AGENT_STEPS} steps)`;
+              }
+              if (agentStepText) {
+                agentStepText.textContent = `Halted at Step ${currentStep} of ${isPlannedTask ? totalPlannedSteps : MAX_AGENT_STEPS}`;
+              }
+              if (agentExecutionStatus) {
+                const targetName = currentStepPlan?.explicitTarget || currentStepPlan?.targetHint || currentStepPlan?.fieldHint || "element";
+                if (currentStepPlan?.isExplicitTarget) {
+                  agentExecutionStatus.textContent = `Target not found: ${targetName}`;
+                } else {
+                  agentExecutionStatus.textContent = `Halted: Remaining steps unfulfilled (${currentStep} of ${totalPlannedSteps}).`;
+                }
+              }
             }
             break;
           }
@@ -3183,18 +3410,21 @@ document.addEventListener("DOMContentLoaded", () => {
           currentStep++;
         }
 
-        if (reasoningPlan && Array.isArray(reasoningPlan.steps) && reasoningPlan.steps.length > 0) {
-          const allCompleted = reasoningPlan.steps.every((s) => s.completed || s.verified);
-          if (allCompleted) {
-            appendPlannerTrace("All requested form fields and actions verified. Task complete.");
-          }
-          if (window.SIHEvaluationTracker) {
-            window.SIHEvaluationTracker.recordTaskEnd(currentRequestId, allCompleted);
-          }
+        // Final verification across reasoningPlan steps
+        let overallTaskSuccess = false;
+        if (window.SIHReasoningPlanner && typeof window.SIHReasoningPlanner.isOverallTaskCompleted === "function") {
+          overallTaskSuccess = window.SIHReasoningPlanner.isOverallTaskCompleted(reasoningPlan, executionTraceHistory);
+        } else if (reasoningPlan && Array.isArray(reasoningPlan.steps) && reasoningPlan.steps.length > 0) {
+          overallTaskSuccess = reasoningPlan.steps.every((s) => s.completed || s.verified);
         } else {
-          if (window.SIHEvaluationTracker) {
-            window.SIHEvaluationTracker.recordTaskEnd(currentRequestId, true);
-          }
+          overallTaskSuccess = executionTraceHistory.some((t) => t.executed && t.status === "success");
+        }
+
+        if (overallTaskSuccess) {
+          appendPlannerTrace("All requested goals and actions verified. Task complete.");
+        }
+        if (window.SIHEvaluationTracker) {
+          window.SIHEvaluationTracker.recordTaskEnd(currentRequestId, overallTaskSuccess);
         }
       } catch (err) {
         console.error("[SIH26171] Run Agent Task error:", err);
