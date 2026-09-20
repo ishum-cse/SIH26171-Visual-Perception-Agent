@@ -62,9 +62,20 @@ document.addEventListener("DOMContentLoaded", () => {
   const timingFusion = document.getElementById("timingFusion");
   const timingGateway = document.getElementById("timingGateway");
 
-  // Milestone 13 & 14 DOM elements: Browser Agent Task Input & Status Panel
   const taskInput = document.getElementById("taskInput");
   const runAgentTaskBtn = document.getElementById("runAgentTaskBtn");
+
+  // Milestone 20 DOM elements: Voice Assistant Input Layer
+  const voiceMicBtn = document.getElementById("voiceMicBtn");
+  const voiceMicIcon = document.getElementById("voiceMicIcon");
+  const voiceMicLabel = document.getElementById("voiceMicLabel");
+  const voiceStatusBadge = document.getElementById("voiceStatusBadge");
+  const voiceStatusText = document.getElementById("voiceStatusText");
+  const voiceConfirmationCard = document.getElementById("voiceConfirmationCard");
+  const voiceTranscriptText = document.getElementById("voiceTranscriptText");
+  const voiceConfirmBtn = document.getElementById("voiceConfirmBtn");
+  const voiceRetryBtn = document.getElementById("voiceRetryBtn");
+  const voiceClearBtn = document.getElementById("voiceClearBtn");
   const agentTaskText = document.getElementById("agentTaskText");
   const agentRequestId = document.getElementById("agentRequestId");
   const agentScreenshotStatus = document.getElementById("agentScreenshotStatus");
@@ -1507,18 +1518,21 @@ document.addEventListener("DOMContentLoaded", () => {
             </div>
             <div style="font-size: 10.5px; color: #1e293b; margin-bottom: 2px;">
               <strong>Target:</strong> <span style="color: #0f172a; font-weight: 600;">${escapeHtml(t.action?.targetLabel || t.action?.target || "None")}</span>
-              ${t.action?.value ? `<span style="color: #047857; font-family: monospace; font-weight: 600; margin-left: 4px;">(value: '${escapeHtml(t.action.value)}')</span>` : ""}
+              ${t.action?.value ? `<span style="color: #047857; font-family: monospace; font-weight: 600; margin-left: 4px;">(value: '${escapeHtml(window.SIHActionVerifier?.sanitizeFailureReason ? window.SIHActionVerifier.sanitizeFailureReason(String(t.action.value)) : (typeof redactText === "function" ? redactText(String(t.action.value)) : "[REDACTED]"))}')</span>` : ""}
               ${t.action?.amount ? `<span style="color: #64748b; margin-left: 4px;">(${t.action.amount}px)</span>` : ""}
             </div>
             <div style="font-size: 9.5px; color: #475569; display: flex; flex-direction: column; gap: 1px; margin-top: 3px; padding-top: 3px; border-top: 1px dashed #f1f5f9;">
-              <div><strong>Status:</strong> <span style="color: ${execColor}; font-weight: 700;">${escapeHtml(t.executionResult)}</span></div>
-              ${t.verification ? `<div><strong>Verification:</strong> <span style="color: #15803d; font-weight: 600;">✓ ${escapeHtml(t.verification)}</span></div>` : ""}
+              <div><strong>Execution:</strong> <span style="color: ${execColor}; font-weight: 700;">${t.executed ? "SUCCESS" : "FAILED"} — ${escapeHtml(t.executionResult)}</span></div>
+              ${t.verification ? `<div><strong>Verification:</strong> <span style="color: ${
+                (t.verificationDetails && t.verificationDetails.status === "FAILED") ? "#dc2626" : ((t.verificationDetails && t.verificationDetails.status === "UNKNOWN") ? "#d97706" : "#15803d")
+              }; font-weight: 600;">${(t.verificationDetails && t.verificationDetails.status === "FAILED") ? "✗ " : ((t.verificationDetails && t.verificationDetails.status === "UNKNOWN") ? "? " : "✓ ")}${escapeHtml(t.verification)}</span></div>` : ""}
               <details style="margin-top: 2px; font-size: 9px; color: #64748b;">
                 <summary style="cursor: pointer; color: #3b82f6; font-weight: 600;">Audit &amp; Grounding Details</summary>
                 <div style="padding: 4px; background: #f8fafc; border-radius: 4px; margin-top: 2px; border: 1px solid #e2e8f0; line-height: 1.35;">
                   <div>• <strong>Perception:</strong> ${escapeHtml(t.perception || "DOM perception active")}</div>
                   <div>• <strong>Grounding:</strong> ${escapeHtml(t.groundingStr || "Target matched")}</div>
                   <div>• <strong>Safety Gate:</strong> ${escapeHtml(t.safetyDecision || "ALLOWED")} (Approval: ${escapeHtml(t.humanApproval || "NOT REQUIRED")})</div>
+                  ${t.verificationDetails && t.verificationDetails.evidence ? `<div>• <strong>Verification Evidence:</strong> ${escapeHtml(Object.entries(t.verificationDetails.evidence).filter(([_, v]) => v).map(([k]) => k).join(", ") || "State evaluated")}</div>` : ""}
                   ${t.recovery ? `<div style="color: #0369a1; font-weight: bold;">• <strong>Recovery:</strong> ${escapeHtml(t.recovery)}</div>` : ""}
                 </div>
               </details>
@@ -1561,6 +1575,150 @@ document.addEventListener("DOMContentLoaded", () => {
       }
     }
   };
+
+  // =====================================================================
+  // Milestone 20: Voice Assistant Input Layer Integration
+  // =====================================================================
+  let voiceAssistant = null;
+
+  if (window.SIHVoiceAssistant && typeof window.SIHVoiceAssistant.VoiceAssistantController === "function") {
+    voiceAssistant = new window.SIHVoiceAssistant.VoiceAssistantController({
+      onStateChange: (state, message, transcript) => {
+        if (voiceStatusBadge) {
+          voiceStatusBadge.textContent = state;
+          if (state === "LISTENING") {
+            voiceStatusBadge.style.background = "#fee2e2";
+            voiceStatusBadge.style.color = "#dc2626";
+          } else if (state === "CONFIRMING") {
+            voiceStatusBadge.style.background = "#e0f2fe";
+            voiceStatusBadge.style.color = "#0369a1";
+          } else if (state === "RUNNING") {
+            voiceStatusBadge.style.background = "#fef3c7";
+            voiceStatusBadge.style.color = "#b45309";
+          } else if (state === "ERROR") {
+            voiceStatusBadge.style.background = "#fee2e2";
+            voiceStatusBadge.style.color = "#991b1b";
+          } else {
+            voiceStatusBadge.style.background = "#f1f5f9";
+            voiceStatusBadge.style.color = "#475569";
+          }
+        }
+
+        if (voiceStatusText && message) {
+          voiceStatusText.textContent = message;
+          if (state === "ERROR") {
+            voiceStatusText.style.color = "#dc2626";
+          } else if (state === "CONFIRMING") {
+            voiceStatusText.style.color = "#0369a1";
+          } else {
+            voiceStatusText.style.color = "#64748b";
+          }
+        }
+
+        if (voiceMicBtn) {
+          if (state === "LISTENING") {
+            voiceMicBtn.style.background = "#dc2626";
+            if (voiceMicIcon) voiceMicIcon.textContent = "🔴";
+            if (voiceMicLabel) voiceMicLabel.textContent = "Listening...";
+          } else {
+            voiceMicBtn.style.background = "#2563eb";
+            if (voiceMicIcon) voiceMicIcon.textContent = "🎤";
+            if (voiceMicLabel) voiceMicLabel.textContent = "Speak Command";
+          }
+        }
+      },
+
+      onTranscriptReady: (transcript) => {
+        // Update taskInput textarea so user can see what will be executed
+        if (taskInput) {
+          taskInput.value = transcript;
+        }
+        if (voiceTranscriptText) {
+          voiceTranscriptText.textContent = `"${transcript}"`;
+        }
+        if (voiceConfirmationCard) {
+          voiceConfirmationCard.style.display = "block";
+        }
+      },
+
+      onExecute: (confirmedTranscript) => {
+        // Ensure confirmed transcript is in task input
+        if (taskInput) {
+          taskInput.value = confirmedTranscript;
+        }
+        if (voiceConfirmationCard) {
+          voiceConfirmationCard.style.display = "none";
+        }
+        // Seamlessly invoke the existing Agent Task execution pipeline
+        if (runAgentTaskBtn) {
+          runAgentTaskBtn.click();
+        }
+      },
+
+      onError: (errMsg) => {
+        if (voiceConfirmationCard) {
+          voiceConfirmationCard.style.display = "none";
+        }
+      }
+    });
+
+    // Check availability on initialization
+    if (!voiceAssistant.isAvailable()) {
+      if (voiceStatusBadge) {
+        voiceStatusBadge.textContent = "UNAVAILABLE";
+        voiceStatusBadge.style.background = "#f3f4f6";
+        voiceStatusBadge.style.color = "#9ca3af";
+      }
+      if (voiceStatusText) {
+        voiceStatusText.textContent = "Voice input is not available in this browser. You can still use the text Agent Task.";
+      }
+      if (voiceMicBtn) {
+        voiceMicBtn.disabled = true;
+        voiceMicBtn.style.opacity = "0.6";
+        voiceMicBtn.style.cursor = "not-allowed";
+        voiceMicBtn.title = "Speech recognition is not available in this environment";
+      }
+    }
+  }
+
+  // Bind voice controls
+  if (voiceMicBtn) {
+    voiceMicBtn.addEventListener("click", () => {
+      if (!voiceAssistant) return;
+      if (voiceAssistant.getState() === "LISTENING") {
+        voiceAssistant.stopListening();
+      } else {
+        voiceAssistant.startListening();
+      }
+    });
+  }
+
+  if (voiceConfirmBtn) {
+    voiceConfirmBtn.addEventListener("click", () => {
+      if (voiceAssistant) {
+        voiceAssistant.confirmTranscript();
+      }
+    });
+  }
+
+  if (voiceRetryBtn) {
+    voiceRetryBtn.addEventListener("click", () => {
+      if (voiceAssistant) {
+        voiceAssistant.tryAgain();
+      }
+    });
+  }
+
+  if (voiceClearBtn) {
+    voiceClearBtn.addEventListener("click", () => {
+      if (voiceAssistant) {
+        voiceAssistant.clearTranscript();
+      }
+      if (voiceConfirmationCard) {
+        voiceConfirmationCard.style.display = "none";
+      }
+    });
+  }
 
   // =====================================================================
   // =====================================================================
@@ -3175,6 +3333,22 @@ document.addEventListener("DOMContentLoaded", () => {
             }
           });
           if (executionOutput) executionOutput.value = "Executing action via local allowlist...";
+
+          // M21.1: Capture lightweight pre-action state snapshot
+          const preActionState = {
+            url: (latestPageData && latestPageData.url) || activeTab?.url || "",
+            title: (latestPageData && latestPageData.title) || activeTab?.title || "",
+            scrollX: (latestPageData && latestPageData.viewport && typeof latestPageData.viewport.scrollX === "number")
+              ? latestPageData.viewport.scrollX : 0,
+            scrollY: (latestPageData && latestPageData.viewport && typeof latestPageData.viewport.scrollY === "number")
+              ? latestPageData.viewport.scrollY : 0,
+            visualElements: latestVisualElements || [],
+            elementCount: (latestVisualElements || []).length,
+            domSignature: currentSignature?.domSignature || "",
+            pixelHash: currentSignature?.pixelHash || ""
+          };
+
+          let rawExecResult = null;
           await new Promise((resolveExec) => {
             chrome.tabs.sendMessage(
               activeTab.id,
@@ -3182,7 +3356,9 @@ document.addEventListener("DOMContentLoaded", () => {
               (execRes) => {
                 if (chrome.runtime.lastError) {
                   actionExecutionSummary = `Execution error: ${chrome.runtime.lastError.message}`;
+                  rawExecResult = { executed: false, reason: chrome.runtime.lastError.message };
                 } else if (execRes && execRes.result) {
+                  rawExecResult = execRes.result;
                   const r = execRes.result;
                   if (r.executed) {
                     actionExecutedSuccessfully = true;
@@ -3214,6 +3390,7 @@ document.addEventListener("DOMContentLoaded", () => {
                   }
                 } else {
                   actionExecutionSummary = "No execution response received";
+                  rawExecResult = { executed: false, reason: "No execution response received" };
                 }
                 resolveExec();
               }
@@ -3225,15 +3402,62 @@ document.addEventListener("DOMContentLoaded", () => {
           if (agentExecutionStatus) agentExecutionStatus.textContent = actionExecutionSummary;
 
           if (!actionExecutedSuccessfully) {
-            if (agentSafetyStatus) agentSafetyStatus.textContent = `REJECTED by Allowlist: ${actionExecutionSummary}`;
+            if (agentSafetyStatus) agentSafetyStatus.textContent = `REJECTED: ${actionExecutionSummary}`;
+
+            let m21Verification = null;
+            if (window.SIHActionVerifier && typeof window.SIHActionVerifier.verifyActionOutcome === "function") {
+              m21Verification = window.SIHActionVerifier.verifyActionOutcome(
+                preActionState,
+                preActionState,
+                agentAction,
+                rawExecResult
+              );
+            } else {
+              m21Verification = {
+                status: "FAILED",
+                verified: false,
+                actionType: agentAction.action,
+                reason: `Execution failed: ${actionExecutionSummary}`,
+                evidence: {
+                  urlChanged: false,
+                  titleChanged: false,
+                  domChanged: false,
+                  visualStateChanged: false,
+                  scrollChanged: false,
+                  targetStateChanged: false,
+                  executionSuccess: false,
+                  executionError: actionExecutionSummary
+                }
+              };
+            }
+
+            const verificationResultStr = `${m21Verification.status}: ${m21Verification.reason}`;
+            if (agentVerificationText) {
+              agentVerificationText.textContent = verificationResultStr;
+              agentVerificationText.style.color = "#dc2626";
+            }
+
+            updatePipelineStage("EXECUTION", "failed", "Execution failed ✗");
+            updatePipelineStage("VERIFICATION", "failed", "Verification failed ✗");
+
             executionTraceHistory.push({
               step: currentStep,
+              totalSteps: isPlannedTask ? totalPlannedSteps : MAX_AGENT_STEPS,
               requestId,
+              agentState: "FAILED",
               action: agentAction,
               executed: false,
               status: "rejected",
+              perception: (latestVisualElements && latestVisualElements.length > 0)
+                ? `${latestVisualElements.length} visual elements perceived locally`
+                : "DOM perception active",
+              groundingStr: `Label='${agentAction.targetLabel || agentAction.target || "none"}', Role=${agentAction.targetType || "element"}`,
+              risk: safetyGate.risk || "LOW",
+              safetyDecision: safetyGate.allowed ? "ALLOWED" : "BLOCKED",
+              humanApproval: safetyGate.requiresApproval ? "GRANTED" : "NOT REQUIRED",
               executionResult: actionExecutionSummary,
-              verification: "Allowlist rejected target"
+              verification: verificationResultStr,
+              verificationDetails: m21Verification
             });
             renderTraceHistory();
             break;
@@ -3246,17 +3470,6 @@ document.addEventListener("DOMContentLoaded", () => {
             actionExecutedSuccessfully ? "completed" : "failed",
             actionExecutedSuccessfully ? `${agentAction?.action} executed ✓` : "Execution failed ✗"
           );
-
-          updateCurrentActionCard({
-            stepText: isPlannedTask ? `STEP ${currentStep} / ${totalPlannedSteps}` : `STEP ${currentStep} / ${MAX_AGENT_STEPS}`,
-            action: agentAction?.action,
-            target: agentAction?.targetLabel || agentAction?.target || targetStr,
-            value: agentAction?.value || "",
-            grounding: `${agentAction?.targetLabel || agentAction?.target || "Grounded"} (Score: ${agentAction?.groundingScore !== undefined ? agentAction.groundingScore : "1.00"})`,
-            risk: safetyGate.risk || "LOW",
-            safety: "ALLOWED",
-            status: actionExecutedSuccessfully ? "Executed (Verifying screen change...)" : "Execution failed"
-          });
 
           if (actionExecutedSuccessfully) {
             appendPlannerTrace(`Step ${currentStep} executed: ${agentAction.action} \u2192 ${targetStr}.`);
@@ -3288,7 +3501,7 @@ document.addEventListener("DOMContentLoaded", () => {
             }
           }
 
-          // Step 11: Post-Action Verification via Screen-Change Detection
+          // Step 11: Post-Action Verification via Screen-Change Detection & M21.1 Action Verifier
           // If an action could navigate or update the DOM, wait for page to stabilize
           if (agentAction.action === "SUBMIT") {
             setAgentState(AGENT_STATES.WAIT, "Waiting for search results...");
@@ -3313,34 +3526,87 @@ document.addEventListener("DOMContentLoaded", () => {
             await new Promise((r) => setTimeout(r, ACTION_VERIFICATION_DELAY_MS));
           }
 
-          setAgentState(AGENT_STATES.VERIFY, "Verifying screen change...");
+          setAgentState(AGENT_STATES.VERIFY, "Verifying post-action outcome...");
           let postActionSignature = null;
-          if (window.SIHChangeDetector && typeof window.SIHChangeDetector.computeScreenSignature === "function") {
-            const updatedDom = await new Promise((resolveDom) => {
-              chrome.tabs.sendMessage(activeTab.id, { action: "getPageInfo" }, (resp) => {
-                resolveDom((resp && resp.visualElements) ? resp.visualElements : latestVisualElements);
-              });
+          let postPageData = null;
+
+          const updatedDom = await new Promise((resolveDom) => {
+            chrome.tabs.sendMessage(activeTab.id, { action: "getPageInfo" }, (resp) => {
+              if (resp && resp.success) {
+                postPageData = resp;
+                resolveDom(resp.visualElements || latestVisualElements);
+              } else {
+                resolveDom(latestVisualElements);
+              }
             });
+          });
 
-            const postDataUrl = (await captureScreenshotDataUrl(activeTab.windowId)) || latestScreenshotDataUrl;
+          const postDataUrl = (await captureScreenshotDataUrl(activeTab.windowId)) || latestScreenshotDataUrl;
 
+          if (window.SIHChangeDetector && typeof window.SIHChangeDetector.computeScreenSignature === "function") {
             postActionSignature = await window.SIHChangeDetector.computeScreenSignature(postDataUrl, updatedDom);
           }
 
-          let verificationResultStr = "Verification unavailable";
+          let changeResult = null;
           if (currentSignature && postActionSignature && window.SIHChangeDetector) {
-            const changeResult = window.SIHChangeDetector.compareScreenSignatures(
+            changeResult = window.SIHChangeDetector.compareScreenSignatures(
               currentSignature,
               postActionSignature,
               PIXEL_CHANGE_THRESHOLD
             );
-            verificationResultStr = changeResult.changed
-              ? `Page changed as expected (${changeResult.reason})`
-              : `No visible change detected (${changeResult.reason})`;
-            if (agentVerificationText) {
-              agentVerificationText.textContent = verificationResultStr;
-              agentVerificationText.style.color = changeResult.changed ? "#2e7d32" : "#e65100";
-            }
+          }
+
+          // M21.1: Post-Action Verification Layer
+          const postActionState = {
+            url: (postPageData && postPageData.url) || activeTab?.url || "",
+            title: (postPageData && postPageData.title) || activeTab?.title || "",
+            scrollX: (postPageData && postPageData.viewport && typeof postPageData.viewport.scrollX === "number")
+              ? postPageData.viewport.scrollX : 0,
+            scrollY: (postPageData && postPageData.viewport && typeof postPageData.viewport.scrollY === "number")
+              ? postPageData.viewport.scrollY : 0,
+            visualElements: updatedDom || [],
+            elementCount: (updatedDom || []).length,
+            domSignature: postActionSignature?.domSignature || "",
+            pixelHash: postActionSignature?.pixelHash || "",
+            pixelDiff: changeResult ? changeResult.pixelDiff : 0,
+            changeResult: changeResult,
+            isSearchResults: postPageData ? Boolean(postPageData.isSearchResults) : false,
+            searchSignals: postPageData ? postPageData.searchSignals : null
+          };
+
+          let m21Verification = null;
+          if (window.SIHActionVerifier && typeof window.SIHActionVerifier.verifyActionOutcome === "function") {
+            m21Verification = window.SIHActionVerifier.verifyActionOutcome(
+              preActionState,
+              postActionState,
+              agentAction,
+              rawExecResult
+            );
+          } else {
+            const isV = changeResult && changeResult.changed;
+            m21Verification = {
+              status: isV ? "VERIFIED" : "UNKNOWN",
+              verified: isV ? true : "unknown",
+              actionType: agentAction.action,
+              reason: changeResult ? changeResult.reason : "Verification completed",
+              evidence: {
+                urlChanged: false,
+                titleChanged: false,
+                domChanged: changeResult ? changeResult.domDiff : false,
+                visualStateChanged: isV,
+                scrollChanged: false,
+                targetStateChanged: false,
+                executionSuccess: true,
+                executionError: null
+              }
+            };
+          }
+
+          const verificationResultStr = `${m21Verification.status}: ${m21Verification.reason}`;
+
+          if (agentVerificationText) {
+            agentVerificationText.textContent = verificationResultStr;
+            agentVerificationText.style.color = m21Verification.status === "VERIFIED" ? "#2e7d32" : (m21Verification.status === "FAILED" ? "#dc2626" : "#d97706");
           }
 
           // Record evaluation metrics (Section 23)
@@ -3352,14 +3618,13 @@ document.addEventListener("DOMContentLoaded", () => {
               executed: actionExecutedSuccessfully,
               risk: safetyGate.risk
             });
-            const isCh = !!(currentSignature && postActionSignature && window.SIHChangeDetector &&
-              window.SIHChangeDetector.compareScreenSignatures(currentSignature, postActionSignature, PIXEL_CHANGE_THRESHOLD).changed);
+            const isCh = m21Verification.status === "VERIFIED";
             window.SIHEvaluationTracker.recordVerification(isCh, verificationResultStr);
 
             updatePipelineStage(
               "VERIFICATION",
-              "completed",
-              isCh ? "Page changed as expected ✓" : "Page state stable ✓"
+              m21Verification.status === "FAILED" ? "failed" : "completed",
+              m21Verification.status === "VERIFIED" ? "Verified ✓" : (m21Verification.status === "FAILED" ? "Verification failed ✗" : "Unknown ?")
             );
 
             // Milestone 18: Live Explainable Agent Overlay (Verified State)
@@ -3376,11 +3641,13 @@ document.addEventListener("DOMContentLoaded", () => {
               stepText: isPlannedTask ? `STEP ${currentStep} / ${totalPlannedSteps}` : `STEP ${currentStep} / ${MAX_AGENT_STEPS}`,
               action: agentAction?.action,
               target: agentAction?.targetLabel || agentAction?.target || targetStr,
-              value: agentAction?.value || "",
+              value: agentAction?.value ? (window.SIHActionVerifier?.sanitizeFailureReason ? window.SIHActionVerifier.sanitizeFailureReason(String(agentAction.value)) : (typeof redactText === "function" ? redactText(String(agentAction.value)) : "[REDACTED]")) : "",
               grounding: `${agentAction?.targetLabel || agentAction?.target || "Grounded"} (Score: ${agentAction?.groundingScore !== undefined ? agentAction.groundingScore : "1.00"})`,
               risk: safetyGate.risk || "LOW",
               safety: "ALLOWED",
-              status: isCh ? "VERIFIED ✓ (Page changed as expected)" : "VERIFIED ✓ (Page state verified)"
+              status: m21Verification.status === "VERIFIED"
+                ? `VERIFIED ✓ (${m21Verification.reason})`
+                : (m21Verification.status === "FAILED" ? `FAILED ✗ (${m21Verification.reason})` : `UNKNOWN ? (${m21Verification.reason})`)
             });
           }
 
@@ -3392,7 +3659,7 @@ document.addEventListener("DOMContentLoaded", () => {
             agentState: currentAgentState || "VERIFY",
             action: agentAction,
             executed: true,
-            status: "success",
+            status: m21Verification.status === "FAILED" ? "verification_failed" : "success",
             perception: (latestVisualElements && latestVisualElements.length > 0)
               ? `${latestVisualElements.length} visual elements perceived locally`
               : "DOM perception active",
@@ -3402,13 +3669,23 @@ document.addEventListener("DOMContentLoaded", () => {
             humanApproval: safetyGate.requiresApproval ? "GRANTED" : "NOT REQUIRED",
             executionResult: actionExecutionSummary,
             verification: verificationResultStr,
+            verificationDetails: m21Verification,
             recovery: stepRecoveryNote
           });
           renderTraceHistory();
 
+          // Milestone 21.1: If verification explicitly failed, halt without blindly continuing
+          if (m21Verification.status === "FAILED") {
+            appendPlannerTrace(`Step ${currentStep} verification failed: ${m21Verification.reason}. Halting execution.`);
+            if (agentExecutionStatus) {
+              agentExecutionStatus.textContent = `Halted: Step ${currentStep} verification failed (${m21Verification.reason})`;
+            }
+            break;
+          }
+
           // Step 12: Loop termination condition
           const executedThisStep = actionExecutedSuccessfully;
-          const screenActuallyChanged = !!(currentSignature && postActionSignature && window.SIHChangeDetector &&
+          const screenActuallyChanged = m21Verification.status === "VERIFIED" || !!(currentSignature && postActionSignature && window.SIHChangeDetector &&
             window.SIHChangeDetector.compareScreenSignatures(currentSignature, postActionSignature, PIXEL_CHANGE_THRESHOLD).changed);
 
           // Check if explicit planned steps remain
