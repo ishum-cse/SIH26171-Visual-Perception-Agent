@@ -1224,29 +1224,232 @@ function isSensitiveElement(el) {
 }
 
 /**
- * Milestone 11: Extracts bounding boxes of visible sensitive elements.
- * Reuses the exact same visibility logic as M8.
+ * Deduplicates overlapping / duplicate sensitive regions.
+ * Merges bounding boxes when overlap is significant.
  *
- * @returns {Array<Object>} Array of sensitive region bounding boxes {x, y, width, height}
+ * @param {Array<Object>} regions - Array of bounding boxes {x, y, width, height, source}
+ * @returns {Array<Object>} Deduplicated array of bounding boxes
+ */
+function deduplicateSensitiveRegions(regions) {
+  if (!Array.isArray(regions) || regions.length <= 1) return regions || [];
+
+  let currentList = regions.map(r => ({ ...r }));
+  let hasMerged = true;
+
+  while (hasMerged) {
+    hasMerged = false;
+    const nextList = [];
+    const mergedIndices = new Set();
+
+    for (let i = 0; i < currentList.length; i++) {
+      if (mergedIndices.has(i)) continue;
+      let boxA = { ...currentList[i] };
+
+      for (let j = i + 1; j < currentList.length; j++) {
+        if (mergedIndices.has(j)) continue;
+        const boxB = currentList[j];
+
+        // Check if boxA and boxB overlap
+        const xOverlap = Math.max(0, Math.min(boxA.x + boxA.width, boxB.x + boxB.width) - Math.max(boxA.x, boxB.x));
+        const yOverlap = Math.max(0, Math.min(boxA.y + boxA.height, boxB.y + boxB.height) - Math.max(boxA.y, boxB.y));
+
+        if (xOverlap > 0 && yOverlap > 0) {
+          const areaA = boxA.width * boxA.height;
+          const areaB = boxB.width * boxB.height;
+          const overlapArea = xOverlap * yOverlap;
+
+          // Merge if overlap covers at least 30% of either box (e.g. nested / overlapping field)
+          if (overlapArea >= 0.3 * Math.min(areaA, areaB)) {
+            const minX = Math.min(boxA.x, boxB.x);
+            const minY = Math.min(boxA.y, boxB.y);
+            const maxX = Math.max(boxA.x + boxA.width, boxB.x + boxB.width);
+            const maxY = Math.max(boxA.y + boxA.height, boxB.y + boxB.height);
+
+            boxA.x = minX;
+            boxA.y = minY;
+            boxA.width = maxX - minX;
+            boxA.height = maxY - minY;
+            boxA.source = (boxA.source === boxB.source) ? boxA.source : "dom-merged";
+
+            mergedIndices.add(j);
+            hasMerged = true;
+          }
+        }
+      }
+      nextList.push(boxA);
+    }
+    currentList = nextList;
+  }
+
+  return currentList;
+}
+
+/**
+ * Comprehensive selector for live form controls, inputs, editable areas, and form token/chip elements.
+ */
+const SENSITIVE_CONTROL_SELECTOR = "input, textarea, select, [contenteditable], [role='textbox'], [role='combobox'], [role='searchbox'], [role='option'], [data-hovercard-id], [email], [data-value], [class*='chip'], [class*='token'], [class*='recipient'], [class*='tag'], [class*='pill']";
+
+/**
+ * Safely and temporarily reads the local value of a live form control or chip for local PII inspection.
+ * Never leaks or transmits raw text outside the client-side content script.
+ *
+ * @param {Element} el - DOM element
+ * @returns {string} Temporary local value
+ */
+function extractElementLocalValue(el) {
+  if (!el) return "";
+  const tagName = (el.tagName || "").toLowerCase();
+
+  if (tagName === "input" || tagName === "textarea") {
+    if (el.value && typeof el.value === "string" && el.value.trim().length > 0) {
+      return el.value;
+    }
+    const attrVal = el.getAttribute ? (el.getAttribute("value") || el.getAttribute("data-value") || "") : "";
+    if (attrVal && typeof attrVal === "string" && attrVal.trim().length > 0) {
+      return attrVal;
+    }
+    const txt = (el.innerText || el.textContent || "").trim();
+    if (txt) return txt;
+    return "";
+  }
+
+  if (tagName === "select") {
+    if (el.selectedOptions && el.selectedOptions[0]) {
+      return el.selectedOptions[0].text || el.value || "";
+    }
+    return el.value || "";
+  }
+
+  if (el.isContentEditable || (el.getAttribute && el.getAttribute("contenteditable") !== null && el.getAttribute("contenteditable") !== "false")) {
+    return el.innerText || el.textContent || "";
+  }
+
+  // Attributes commonly used for email chips / recipient tokens (e.g. Gmail <span email="...">)
+  if (el.getAttribute) {
+    const emailAttr = el.getAttribute("email");
+    if (emailAttr && typeof emailAttr === "string" && emailAttr.trim().length > 0) return emailAttr;
+    const hovercard = el.getAttribute("data-hovercard-id");
+    if (hovercard && typeof hovercard === "string" && hovercard.trim().length > 0) return hovercard;
+    const dataVal = el.getAttribute("data-value");
+    if (dataVal && typeof dataVal === "string" && dataVal.trim().length > 0) return dataVal;
+  }
+
+  return (el.innerText || el.textContent || "").trim();
+}
+
+/**
+ * Checks a string locally for sensitive PII using existing M2 detectors.
+ *
+ * @param {string} val - String to evaluate
+ * @returns {{ detected: boolean, redacted: string }} Detection result
+ */
+function checkValueSensitivity(val) {
+  if (!val || typeof val !== "string" || !val.trim()) {
+    return { detected: false, redacted: "" };
+  }
+  if (typeof detectAndRedactSensitiveValue === "function") {
+    return detectAndRedactSensitiveValue(val);
+  }
+  if (typeof window !== "undefined" && typeof window.detectAndRedactSensitiveValue === "function") {
+    return window.detectAndRedactSensitiveValue(val);
+  }
+  if (typeof globalThis !== "undefined" && typeof globalThis.detectAndRedactSensitiveValue === "function") {
+    return globalThis.detectAndRedactSensitiveValue(val);
+  }
+  if (typeof redactText === "function") {
+    const red = redactText(val);
+    return { detected: red !== val, redacted: red };
+  }
+  if (typeof window !== "undefined" && typeof window.redactText === "function") {
+    const red = window.redactText(val);
+    return { detected: red !== val, redacted: red };
+  }
+  if (typeof globalThis !== "undefined" && typeof globalThis.redactText === "function") {
+    const red = globalThis.redactText(val);
+    return { detected: red !== val, redacted: red };
+  }
+  if (typeof require === "function") {
+    try {
+      const pii = require("./pii-detector.js");
+      if (pii && typeof pii.detectAndRedactSensitiveValue === "function") {
+        return pii.detectAndRedactSensitiveValue(val);
+      }
+    } catch (_) {}
+  }
+  return { detected: false, redacted: "" };
+}
+
+/**
+ * Milestone 11 & SIH26171: Extracts bounding boxes of visible sensitive elements.
+ * Combines:
+ * A. Structural detection (M11): password fields, type=email, sensitive name/id/placeholder keywords (even if empty).
+ * B. Local value-based detection (SIH26171): arbitrary form fields containing sensitive PII (emails, phones, credit cards, passwords).
+ *
+ * Privacy & Security Guarantees:
+ * - Temporary local inspection only; NEVER exports or logs the raw .value string.
+ * - Deduplicates overlapping bounding boxes.
+ *
+ * @returns {Array<Object>} Array of sensitive region bounding boxes {x, y, width, height, source}
  */
 function extractSensitiveRegions() {
-  const elements = document.querySelectorAll("input, textarea");
+  const elements = document.querySelectorAll(SENSITIVE_CONTROL_SELECTOR);
   const sensitiveRegions = [];
 
   elements.forEach((el) => {
-    if (!isSensitiveElement(el)) return;
-    const rect = getVisibleRect(el);
-    if (!rect) return;
+    // Isolate agent overlay elements
+    if (el.closest && (el.closest("#sih-agent-overlay-root") || el.closest("[id^='sih-agent-overlay']"))) {
+      return;
+    }
+    if (el.id && el.id.startsWith("sih-agent-overlay")) {
+      return;
+    }
 
-    sensitiveRegions.push({
-      x: Math.round(rect.x),
-      y: Math.round(rect.y),
-      width: Math.round(rect.width),
-      height: Math.round(rect.height)
-    });
+    // Reason A: Existing M11 structural sensitivity (password, type=email, sensitive keywords)
+    const isStructural = isSensitiveElement(el);
+
+    // Reason B: Local value-based PII detection
+    let isValueSensitive = false;
+    const localVal = extractElementLocalValue(el);
+
+    if (localVal) {
+      const check = checkValueSensitivity(localVal);
+      if (check && check.detected) {
+        isValueSensitive = true;
+      }
+    }
+
+    // If sensitive either structurally or by live value
+    if (isStructural || isValueSensitive) {
+      let rect = getVisibleRect(el);
+      // Fallback for shrunk/tokenized inputs (e.g. styled cursor or chip inputs) where parent container has the visible bounds
+      if ((!rect || rect.width < 40) && el.parentElement) {
+        const parentRect = getVisibleRect(el.parentElement);
+        if (parentRect && parentRect.width > (rect ? rect.width : 2)) {
+          rect = parentRect;
+        }
+      }
+      if (!rect) return;
+
+      const left = typeof rect.x === "number" ? rect.x : (typeof rect.left === "number" ? rect.left : 0);
+      const top = typeof rect.y === "number" ? rect.y : (typeof rect.top === "number" ? rect.top : 0);
+      const rx = Math.round(left);
+      const ry = Math.round(top);
+      const rw = Math.round(rect.width);
+      const rh = Math.round(rect.height);
+
+      if (rw > 0 && rh > 0) {
+        sensitiveRegions.push({
+          x: rx,
+          y: ry,
+          width: rw,
+          height: rh,
+          source: (isValueSensitive && !isStructural) ? "dom-value" : "dom"
+        });
+      }
+    }
   });
 
-  return sensitiveRegions;
+  return deduplicateSensitiveRegions(sensitiveRegions);
 }
 
 let currentApprovalCallback = null;
@@ -1741,18 +1944,46 @@ if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.onMessage)
       // 2. Extract a small snippet of visible text (capped at 2000 characters)
       const rawVisibleText = document.body ? document.body.innerText.slice(0, 2000) : "";
 
-      // 3. Redact any sensitive PII locally before sending back (Milestone 2)
-      const redactedSample = typeof redactText === "function" 
+      // 3. Redact any sensitive PII locally before sending back (Milestone 2 & SIH26171)
+      let redactedSample = typeof redactText === "function" 
         ? redactText(rawVisibleText) 
         : rawVisibleText;
+
+      // SIH26171: Construct a LOCAL SANITIZED FORM SUMMARY for form fields with sensitive PII.
+      // NEVER appends raw values, only sanitized representations (e.g. "[Label]: [REDACTED_EMAIL]").
+      try {
+        const formControls = document.querySelectorAll(SENSITIVE_CONTROL_SELECTOR);
+        const sanitizedFormSnippets = [];
+
+        formControls.forEach((el) => {
+          if (el.closest && (el.closest("#sih-agent-overlay-root") || el.closest("[id^='sih-agent-overlay']"))) return;
+          if (el.id && el.id.startsWith("sih-agent-overlay")) return;
+
+          const localVal = extractElementLocalValue(el);
+          if (localVal) {
+            const check = checkValueSensitivity(localVal);
+            if (check && check.detected) {
+              const tagName = (el.tagName || "").toLowerCase();
+              const fieldType = (tagName === "input" ? (el.type || "input") : tagName);
+              const safeLabel = extractFormFieldLabel(el, fieldType) || "Field";
+              sanitizedFormSnippets.push(`${safeLabel}: ${check.redacted}`);
+            }
+          }
+        });
+
+        if (sanitizedFormSnippets.length > 0) {
+          redactedSample += (redactedSample ? "\n\n[Sanitized Form Summary]:\n" : "[Sanitized Form Summary]:\n") + sanitizedFormSnippets.join("\n");
+        }
+      } catch (_) {}
 
       // 4. Local visual context perception: extract visible UI elements (Milestone 8)
       const visualElements = extractVisualElements();
 
-      // 5. Local visual privacy: extract sensitive regions (Milestone 11)
+      // 5. Local visual privacy: extract sensitive regions (Milestone 11 & SIH26171)
       const tSensStart = performance.now();
       const sensitiveRegions = extractSensitiveRegions();
       const sensitiveDetectionMs = Math.round(performance.now() - tSensStart);
+      const valueBasedPiiCount = Array.isArray(sensitiveRegions) ? sensitiveRegions.filter(r => r.source === "dom-value").length : 0;
 
       // 6. Local search results state detection (Milestone 13 Cross-Website Robustness)
       const urlLower = url.toLowerCase();
@@ -1773,11 +2004,19 @@ if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.onMessage)
         visualElements,
         sensitiveRegions,
         sensitiveDetectionMs,
+        valueBasedPiiCount,
         isSearchResults,
         searchSignals: {
           hasSearchUrl,
           hasSearchTitle,
           containerCount: resultContainers ? resultContainers.length : 0
+        },
+        viewport: {
+          width: window.innerWidth || (document.documentElement ? document.documentElement.clientWidth : 0),
+          height: window.innerHeight || (document.documentElement ? document.documentElement.clientHeight : 0),
+          devicePixelRatio: window.devicePixelRatio || 1,
+          scrollX: window.scrollX || 0,
+          scrollY: window.scrollY || 0
         }
       });
       return false;
@@ -1852,6 +2091,12 @@ if (typeof module !== "undefined" && module.exports) {
     removeInPageApprovalModal,
     showAgentOverlay,
     updateAgentOverlay,
-    clearAgentOverlay
+    clearAgentOverlay,
+    isSensitiveElement,
+    extractSensitiveRegions,
+    deduplicateSensitiveRegions,
+    extractElementLocalValue,
+    checkValueSensitivity,
+    SENSITIVE_CONTROL_SELECTOR
   };
 }

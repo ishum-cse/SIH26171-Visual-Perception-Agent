@@ -25,7 +25,16 @@
  */
 function mergeSensitiveRegions(domRegions = [], ocrRegions = [], screenshotWidth = 0, screenshotHeight = 0, dpr = 1) {
   const normalized = [];
-  const safeDpr = (typeof dpr === "number" && dpr > 0) ? dpr : 1;
+  let safeScaleX = 1;
+  let safeScaleY = 1;
+
+  if (typeof dpr === "object" && dpr !== null) {
+    safeScaleX = (typeof dpr.scaleX === "number" && dpr.scaleX > 0) ? dpr.scaleX : ((typeof dpr.x === "number" && dpr.x > 0) ? dpr.x : 1);
+    safeScaleY = (typeof dpr.scaleY === "number" && dpr.scaleY > 0) ? dpr.scaleY : ((typeof dpr.y === "number" && dpr.y > 0) ? dpr.y : 1);
+  } else if (typeof dpr === "number" && dpr > 0) {
+    safeScaleX = dpr;
+    safeScaleY = dpr;
+  }
 
   // 1. Normalize DOM regions: CSS pixels -> screenshot pixels
   if (Array.isArray(domRegions)) {
@@ -33,10 +42,10 @@ function mergeSensitiveRegions(domRegions = [], ocrRegions = [], screenshotWidth
       if (!r || typeof r.x !== "number" || typeof r.y !== "number" ||
           typeof r.width !== "number" || typeof r.height !== "number") return;
 
-      const rx = r.scaled ? Math.round(r.x) : Math.round(r.x * safeDpr);
-      const ry = r.scaled ? Math.round(r.y) : Math.round(r.y * safeDpr);
-      const rw = r.scaled ? Math.round(r.width) : Math.round(r.width * safeDpr);
-      const rh = r.scaled ? Math.round(r.height) : Math.round(r.height * safeDpr);
+      const rx = r.scaled ? Math.round(r.x) : Math.round(r.x * safeScaleX);
+      const ry = r.scaled ? Math.round(r.y) : Math.round(r.y * safeScaleY);
+      const rw = r.scaled ? Math.round(r.width) : Math.round(r.width * safeScaleX);
+      const rh = r.scaled ? Math.round(r.height) : Math.round(r.height * safeScaleY);
 
       normalized.push({
         x: rx,
@@ -213,18 +222,25 @@ async function buildSanitizedScreenshot(screenshotDataUrl, sensitiveRegions) {
             // Skip zero or negative area regions
             if (rw <= 0 || rh <= 0) continue;
 
+            // Apply 2px margin for DOM sensitive fields to guarantee 100% pixel coverage of borders/anti-aliasing
+            const pad = (region.source === "dom-value" || region.source === "dom") ? 2 : 0;
+            const maskX = Math.max(0, rx - pad);
+            const maskY = Math.max(0, ry - pad);
+            const maskW = Math.min(naturalW - maskX, rw + pad * 2);
+            const maskH = Math.min(naturalH - maskY, rh + pad * 2);
+
             // Draw opaque solid black masking box over the sensitive region
             ctx.fillStyle = "#000000";
-            ctx.fillRect(rx, ry, rw, rh);
+            ctx.fillRect(maskX, maskY, maskW, maskH);
 
             // Small "REDACTED" label if region is sufficiently sized
-            if (rw >= 40 && rh >= 14) {
+            if (maskW >= 40 && maskH >= 14) {
               ctx.fillStyle = "#ffffff";
-              const fontSize = Math.max(9, Math.min(13, Math.floor(rh * 0.45)));
+              const fontSize = Math.max(9, Math.min(13, Math.floor(maskH * 0.45)));
               ctx.font = `bold ${fontSize}px sans-serif`;
               ctx.textBaseline = "middle";
               ctx.textAlign = "center";
-              ctx.fillText("REDACTED", rx + rw / 2, ry + rh / 2);
+              ctx.fillText("REDACTED", maskX + maskW / 2, maskY + maskH / 2);
             }
           }
 

@@ -50,3 +50,45 @@ function redactText(text) {
 if (typeof window !== "undefined") {
   window.redactText = redactText;
 }
+
+/**
+ * Helper to inspect a single string locally for sensitive PII.
+ * Reuses the existing redactText() pipeline without duplicating regex systems.
+ * NEVER returns the original raw value.
+ *
+ * @param {string} value - Value to inspect locally
+ * @returns {{ detected: boolean, redacted: string }} Sanitized detection result
+ */
+function detectAndRedactSensitiveValue(value) {
+  if (!value || typeof value !== "string") {
+    return { detected: false, redacted: "" };
+  }
+
+  const redacted = redactText(value);
+  const detected = redacted !== value;
+
+  return {
+    detected,
+    redacted
+  };
+}
+
+// Expose helper to window, globalThis, and CommonJS environments
+if (typeof window !== "undefined") {
+  window.detectAndRedactSensitiveValue = detectAndRedactSensitiveValue;
+}
+if (typeof globalThis !== "undefined") {
+  globalThis.redactText = redactText;
+  globalThis.detectAndRedactSensitiveValue = detectAndRedactSensitiveValue;
+}
+
+if (typeof module !== "undefined" && module.exports) {
+  module.exports = {
+    redactText,
+    detectAndRedactSensitiveValue,
+    PASSWORD_REGEX,
+    CREDIT_CARD_REGEX,
+    PHONE_REGEX,
+    EMAIL_REGEX
+  };
+}

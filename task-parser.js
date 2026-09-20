@@ -59,20 +59,7 @@
     if (!task || typeof task !== "string") return null;
     const taskClean = task.trim();
 
-    // 1. Explicit fill patterns: "fill <field> as/with <val>", "enter <val> in <field>"
-    const mAs = taskClean.match(/\b(?:fill|enter|type|set)\b.*?\b(?:as|with|value)\s+['"]?([^'",;]+?)['"]?(?:\s+(?:and|then)\b|[.,;!?]|$)/i);
-    if (mAs) {
-      const val = mAs[1].trim();
-      if (val && !/^(?:the|a|an|box|input|field|button)$/i.test(val)) return val;
-    }
-
-    const mIn = taskClean.match(/\b(?:enter|type|put)\s+['"]?([^'",;]+?)['"]?\s+(?:in|into)\b/i);
-    if (mIn) {
-      const val = mIn[1].trim();
-      if (val && !/^(?:the|a|an|box|input|field|button)$/i.test(val)) return val;
-    }
-
-    // 2. Search query pattern:
+    // 1. Search query pattern (takes precedence when searching):
     // Strictly bounds the query before verbs like 'and identify', 'and find', 'and open', 'and click', 'and select', 'and visit', etc.
     const mSearch = taskClean.match(/(?<!\bfill\s)(?<!\benter\s)(?<!\btype\s)(?<!\bclick\s)(?<!\bfind\s)\bsearch\s+(?:for\s+)?(?!(?:the\s+)?(?:box|input|field|bar|area|button)\b)['"]?([^'",;]+?)['"]?(?:\s+(?:and\s+then|and\s+(?:identify|find|open|click|select|locate|choose|visit)|then\s+(?:identify|find|open|click|select|locate|choose|visit))\b|[.,;!?]|$)/i);
     if (mSearch) {
@@ -80,6 +67,34 @@
       if (val && !/^(?:the|a|an|it|this|that|box|input|field|bar|area|button)$/i.test(val)) {
         return val;
       }
+    }
+
+    // 2. Explicit fill pattern: "enter/type/put <val> as [the] <field>" (CRITICAL: <val> is before 'as', <field> is after)
+    const mEnterAs = taskClean.match(/\b(?:enter|type|put)\s+['"]?([^'",;]+?)['"]?\s+as\s+(?:the\s+)?[a-zA-Z0-9_\-\s]+/i);
+    if (mEnterAs) {
+      const val = mEnterAs[1].trim();
+      if (val && !/^(?:the|a|an|box|input|field|button)$/i.test(val)) return val;
+    }
+
+    // 3. Explicit fill pattern: "enter/type/put <val> in/into/for [the] <field>"
+    const mIn = taskClean.match(/\b(?:enter|type|put)\s+['"]?([^'",;]+?)['"]?\s+(?:in|into|for)\b/i);
+    if (mIn) {
+      const val = mIn[1].trim();
+      if (val && !/^(?:the|a|an|box|input|field|button)$/i.test(val)) return val;
+    }
+
+    // 4. Explicit fill pattern: "fill/set [the] <field> as/with/to <val>"
+    const mFill = taskClean.match(/\b(?:fill|set)\b.*?\b(?:as|with|value|to)\s+['"]?([^'",;]+?)['"]?(?:\s+(?:and|then)\b|[.,;!?]|$)/i);
+    if (mFill) {
+      const val = mFill[1].trim();
+      if (val && !/^(?:the|a|an|box|input|field|button)$/i.test(val)) return val;
+    }
+
+    // 5. Standalone type/write pattern: "type/write <val>"
+    const mType = taskClean.match(/\b(?:type|write)\s+['"]?([^'",;]+?)['"]?(?:\s+(?:and|then)\b|[.,;!?]|$)/i);
+    if (mType) {
+      const val = mType[1].trim();
+      if (val && !/^(?:the|a|an|box|input|field|button|it|this|that)$/i.test(val)) return val;
     }
 
     return null;
@@ -105,7 +120,17 @@
       return null;
     }
 
-    // Pattern 1: '[enter/type/put] <val> in/into/for <field>'
+    // Pattern 1a: 'enter/type/put <val> as [the] <field>' (CRITICAL: val is BEFORE 'as', field is AFTER 'as')
+    const enterAsMatch = text.match(/^(?:enter|type|put)\s+(.+?)\s+as\s+(?:the\s+)?([a-zA-Z0-9_\-\s]+?)(?:\s+field|\s+input|\s+box|\s+area)?$/i);
+    if (enterAsMatch) {
+      const val = enterAsMatch[1].trim();
+      const field = enterAsMatch[2].trim();
+      if (val && field && !/^(?:the|a|an|to)$/i.test(val)) {
+        return { type: "FILL", fieldHint: field, value: val };
+      }
+    }
+
+    // Pattern 1b: '[enter/type/put] <val> in/into/for <field>'
     const enterInMatch = text.match(/^(?:(?:enter|type|put)\s+)?(.+?)\s+in(?:to|for)?\s+(?:the\s+)?([a-zA-Z0-9_\-\s]+?)(?:\s+field|\s+input|\s+box|\s+area)?$/i);
     if (enterInMatch) {
       const val = enterInMatch[1].trim();
@@ -115,8 +140,8 @@
       }
     }
 
-    // Pattern 2a: With explicit fill verb: '[fill/set/enter/type/put] [in/into] [the] <field> with/to/as/is/:/= <val>'
-    const explicitFillMatch = text.match(/^(?:fill|set|enter|type|put)\s+(?:in\s+|into\s+)?(?:the\s+)?([a-zA-Z0-9_\-\s]+?)(?:\s+(?:with|to|as|is|:=|=)\s+|\s*:\s*)(.+)$/i);
+    // Pattern 2a: With explicit fill verb: '[fill/set] [in/into] [the] <field> with/to/as/is/:/= <val>'
+    const explicitFillMatch = text.match(/^(?:fill|set)\s+(?:in\s+|into\s+)?(?:the\s+)?([a-zA-Z0-9_\-\s]+?)(?:\s+(?:with|to|as|is|:=|=)\s+|\s*:\s*)(.+)$/i);
     if (explicitFillMatch) {
       const field = explicitFillMatch[1].trim();
       const val = explicitFillMatch[2].trim();
@@ -130,8 +155,17 @@
     if (implicitFillMatch) {
       const field = implicitFillMatch[1].trim();
       const val = implicitFillMatch[2].trim();
-      if (field && val) {
+      if (field && val && !/^(?:search|click|press|tap|open|find|go)$/i.test(field)) {
         return { type: "FILL", fieldHint: field, value: val };
+      }
+    }
+
+    // Pattern 3: 'type/write <val>' (e.g. "type Hello" -> FILL body with value "Hello")
+    const typeValMatch = text.match(/^(?:type|write)\s+['"]?([^'"]+?)['"]?$/i);
+    if (typeValMatch) {
+      const val = typeValMatch[1].trim();
+      if (val && !/^(?:the|a|an|it|this|that)$/i.test(val)) {
+        return { type: "FILL", fieldHint: "body", value: val };
       }
     }
 
@@ -199,6 +233,12 @@
       (match, query) => {
         return `fill search as ${query.trim()}`;
       }
+    );
+
+    // 5. Normalize trailing verification phrases like ", and verify that the email was sent", ", verify that...", "and confirm that..."
+    text = text.replace(
+      /(?:,\s*|\s+)(?:and\s+)?(?:then\s+)?(?:verify|confirm|ensure|check)(?:\s+that)?(?:\s+.*)?$/i,
+      ""
     );
 
     return text;
@@ -371,45 +411,55 @@
       return createNoneResult("Empty task");
     }
 
-    // Section 3: Recognize generic search workflows first
-    // Multi-page / repeated search workflow check:
-    // If the task contains multiple sequential search intents across navigation (e.g. Google -> open YouTube -> search on YouTube),
-    // parse each stage independently and concatenate their steps in order.
-    const searchOccurrences = (rawTask.match(/\bsearch\b/gi) || []).length;
-    if (searchOccurrences >= 2) {
-      // Stage boundary occurs after an open/click/select/submit result clause when followed by a new search/find-search-box phase:
-      const multiSearchSplitPattern = /(?<=(?:open|click|select|view)\s+(?:on\s+)?(?:the\s+)?(?:(?:most\s+relevant|actual|first|top|selected|chosen|official|main|verified|primary)\s+)*(?:[a-zA-Z0-9_\-]+\s+)?(?:product|result|item|listing|video|movie|article|song|track|stream|content|website|site|webpage|page|link|portal|entry|it|that|them)|(?:submit\s+search|submit))\s*(?:,\s*(?:then|and\s+then|and)?|\s+(?:then|and\s+then|and)|\s*;\s*(?:then)?|\.\s*|\s+after\s+opening\s+[^,;]+,?\s*)\s*(?=(?:(?:find|locate|go\s+to|click)\s+(?:on\s+)?(?:the\s+)?(?:[a-zA-Z0-9_\-]+\s+)?(?:search\s+(?:box|input|field|bar|area)|search)\b|search\b))/i;
+    // Strip trailing verification assertions if present (e.g. ", and verify that the email was sent")
+    const cleanRawTask = rawTask.trim().replace(
+      /(?:,\s*|\s+)(?:and\s+)?(?:then\s+)?(?:verify|confirm|ensure|check)(?:\s+that)?(?:\s+.*)?$/i,
+      ""
+    );
 
-      let searchParts = rawTask.trim().split(multiSearchSplitPattern);
-      if (searchParts.length <= 1) {
-        const legacyPattern = /(?:,\s*then|\s+then|\s*;\s*then|\s*,\s*and\s+then|\s+and\s+then|\s+after\s+opening\s+(?:it|the\s+result|the\s+product|that|the\s+video|the\s+item))\s+(?=(?:find|locate|go\s+to|click|search|on\b|in\b))/i;
-        searchParts = rawTask.trim().split(legacyPattern);
+    // Section 3: Recognize generic search workflows & multi-stage workflow check:
+    // If the task contains sequential workflow stages across search or interactive actions,
+    // split at the result selection boundary and parse each stage.
+    const multiStageSplitPattern = /(?<=(?:open|click|select|view)\s+(?:on\s+)?(?:the\s+)?(?:(?:most\s+relevant|actual|first|top|selected|chosen|official|main|verified|primary)\s+)*(?:[a-zA-Z0-9_\-]+\s+)?(?:product|result|item|listing|video|movie|article|song|track|stream|content|website|site|webpage|page|link|portal|entry|it|that|them)|(?:submit\s+search|submit))\s*(?:,\s*(?:then|and\s+then|and)?|\s+(?:then|and\s+then|and)|\s*;\s*(?:then)?|\.\s*|\s+after\s+opening\s+[^,;]+,?\s*)\s*(?=(?:(?:find|locate|go\s+to|click)\s+(?:on\s+)?(?:the\s+)?(?:[a-zA-Z0-9_\-]+\s+)?(?:search\s+(?:box|input|field|bar|area)|search)\b|search\b|compose\b|enter\b|type\b|fill\b|send\b|write\b))/i;
+
+    let stageParts = cleanRawTask.split(multiStageSplitPattern);
+    if (stageParts.length <= 1) {
+      const legacyPattern = /(?:,\s*then|\s+then|\s*;\s*then|\s*,\s*and\s+then|\s+and\s+then|\s+after\s+opening\s+(?:it|the\s+result|the\s+product|that|the\s+video|the\s+item))\s+(?=(?:find|locate|go\s+to|click|search|on\b|in\b))/i;
+      const legacyParts = cleanRawTask.split(legacyPattern);
+      if (legacyParts.length > 1 && legacyParts.every((p) => /\bsearch\b/i.test(p))) {
+        stageParts = legacyParts;
       }
+    }
 
-      if (searchParts.length > 1 && searchParts.every((p) => /\bsearch\b/i.test(p))) {
-        let combinedSteps = [];
-        let allValid = true;
-        for (const part of searchParts) {
-          const stageSteps = parseSearchWorkflow(part.trim());
-          if (stageSteps && stageSteps.length > 0) {
-            combinedSteps = combinedSteps.concat(stageSteps);
+    if (stageParts.length > 1) {
+      let combinedSteps = [];
+      let allValid = true;
+      for (const part of stageParts) {
+        const trimmedPart = part.trim();
+        const stageWorkflow = parseSearchWorkflow(trimmedPart);
+        if (stageWorkflow && stageWorkflow.length > 0) {
+          combinedSteps = combinedSteps.concat(stageWorkflow);
+        } else {
+          const subRes = parseTask(trimmedPart);
+          if (subRes.intent !== "NONE" && Array.isArray(subRes.steps) && subRes.steps.length > 0 && subRes.steps[0].type !== "NONE") {
+            combinedSteps = combinedSteps.concat(subRes.steps);
           } else {
             allValid = false;
             break;
           }
         }
-        if (allValid && combinedSteps.length > 0) {
-          return buildResultFromSteps(combinedSteps);
-        }
+      }
+      if (allValid && combinedSteps.length > 0) {
+        return buildResultFromSteps(combinedSteps);
       }
     }
 
-    const searchWorkflowSteps = parseSearchWorkflow(rawTask);
+    const searchWorkflowSteps = parseSearchWorkflow(cleanRawTask);
     if (searchWorkflowSteps && searchWorkflowSteps.length > 0) {
       return buildResultFromSteps(searchWorkflowSteps);
     }
 
-    const task = normalizeTaskPhrasing(rawTask);
+    const task = normalizeTaskPhrasing(cleanRawTask);
     if (!task) {
       return createNoneResult("Empty task");
     }
@@ -500,6 +550,11 @@
       for (const clause of andSplit) {
         const trimmedClause = clause.trim();
 
+        // Skip standalone verification clauses like "verify that the email was sent", "and verify...", etc.
+        if (/^(?:and\s+)?(?:then\s+)?(?:verify|confirm|ensure|check)\b/i.test(trimmedClause)) {
+          continue;
+        }
+
         // Check if this clause is a pronoun referral like "click it", "then click it", "and click it", "select it"
         if (isPronounOrReference(trimmedClause) || /^(?:and\s+)?(?:then\s+)?(?:click|press|tap|select|use)\s+(?:on\s+)?(?:it|this|that|them|that\s+button|this\s+button|that\s+link|this\s+link|the\s+above|above|the\s+field|that\s+field|this\s+field|the\s+button|button|the\s+link|link)$/i.test(trimmedClause)) {
           if (parsedClauses.length > 0) {
@@ -574,6 +629,11 @@
             type: "FILL",
             fieldHint: "search",
             value: query
+          },
+          {
+            type: "SUBMIT",
+            targetHint: "search",
+            query: query
           }
         ]);
       }
@@ -625,6 +685,30 @@
           type: "CLICK",
           targetHint: targetHint,
           legacyTarget: resolveLegacyClickTarget(targetHint)
+        }
+      ]);
+    }
+
+    // 6d. COMPOSE intent: e.g. "compose a new email", "compose email", "compose new message", "compose"
+    const composeMatch = task.match(/^compose(?:\s+(?:(?:a\s+|an\s+)?(?:new\s+)?([a-zA-Z0-9_\-\s]+?)))?$/i);
+    if (composeMatch) {
+      return buildResultFromSteps([
+        {
+          type: "CLICK",
+          targetHint: "compose",
+          legacyTarget: null
+        }
+      ]);
+    }
+
+    // 6e. SEND intent: e.g. "send the email", "send email", "send message", "send"
+    const sendMatch = task.match(/^send(?:\s+(?:the\s+)?(?:email|mail|message))?$/i);
+    if (sendMatch) {
+      return buildResultFromSteps([
+        {
+          type: "CLICK",
+          targetHint: "send",
+          legacyTarget: resolveLegacyClickTarget("send")
         }
       ]);
     }
@@ -774,6 +858,11 @@
         const normHint = (step.fieldHint || "").toLowerCase().trim();
         if (normHint) {
           localValues[normHint] = step.value;
+          if (normHint === "body") {
+            localValues["message"] = step.value;
+          } else if (normHint === "message") {
+            localValues["body"] = step.value;
+          }
         }
       } else if (step.type === "SUBMIT") {
         sanitizedPlan.push({

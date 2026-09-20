@@ -572,18 +572,48 @@ document.addEventListener("DOMContentLoaded", () => {
         throw new Error("SIHRedactor module not loaded");
       }
 
-      // Step 5: Region merging (DOM + OCR)
+      // Ensure natural screenshot dimensions are fully loaded before coordinate scaling
+      if ((!latestScreenshotDims || !latestScreenshotDims.width || !latestScreenshotDims.height) && latestScreenshotDataUrl) {
+        await new Promise((res) => {
+          const img = new Image();
+          img.onload = () => {
+            latestScreenshotDims = {
+              width: img.naturalWidth || img.width || 0,
+              height: img.naturalHeight || img.height || 0
+            };
+            res();
+          };
+          img.onerror = () => res();
+          img.src = latestScreenshotDataUrl;
+        });
+      }
+
+      // Step 5: Region merging (DOM + OCR) with exact viewport coordinate scaling
       const tMerge0 = performance.now();
-      const dpr = (typeof window !== "undefined" && window.devicePixelRatio) ? window.devicePixelRatio : 1;
+      const tabViewport = (latestPageData && latestPageData.viewport) ? latestPageData.viewport : null;
+      let scaleX = (typeof window !== "undefined" && window.devicePixelRatio) ? window.devicePixelRatio : 1;
+      let scaleY = scaleX;
+
+      if (tabViewport && typeof tabViewport.devicePixelRatio === "number" && tabViewport.devicePixelRatio > 0) {
+        scaleX = tabViewport.devicePixelRatio;
+        scaleY = tabViewport.devicePixelRatio;
+      }
+      if (latestScreenshotDims && latestScreenshotDims.width > 0 && tabViewport && tabViewport.width > 0) {
+        scaleX = latestScreenshotDims.width / tabViewport.width;
+      }
+      if (latestScreenshotDims && latestScreenshotDims.height > 0 && tabViewport && tabViewport.height > 0) {
+        scaleY = latestScreenshotDims.height / tabViewport.height;
+      }
+
       let mergedRegions = [];
 
       if (typeof window.SIHRedactor.mergeSensitiveRegions === "function") {
         mergedRegions = window.SIHRedactor.mergeSensitiveRegions(
           latestSensitiveRegions,
           latestOcrSensitiveRegions,
-          latestScreenshotDims.width,
-          latestScreenshotDims.height,
-          dpr
+          latestScreenshotDims ? latestScreenshotDims.width : 0,
+          latestScreenshotDims ? latestScreenshotDims.height : 0,
+          { scaleX, scaleY }
         );
       } else {
         // Fallback to DOM regions if merge function is absent
@@ -620,6 +650,16 @@ document.addEventListener("DOMContentLoaded", () => {
           privacyRedactionStatus.textContent = "ACTIVE";
           privacyRedactionStatus.style.color = "#2e7d32";
         }
+
+        // CRITICAL: Render the sanitized/redacted screenshot in the Local Visual Perception Preview
+        if (screenshotPreview) {
+          screenshotPreview.src = redactionResult.sanitizedScreenshotDataUrl;
+          screenshotPreview.style.display = "block";
+        }
+        if (visualStatus) {
+          visualStatus.style.display = "none";
+        }
+
         if (sanitizedScreenshotPreview) {
           sanitizedScreenshotPreview.src = redactionResult.sanitizedScreenshotDataUrl;
           sanitizedScreenshotPreview.style.display = "block";
@@ -638,6 +678,17 @@ document.addEventListener("DOMContentLoaded", () => {
       latestSanitizedDataUrl = null;
       redactionError = err.message || String(err);
       console.error("Local screenshot redaction error:", err);
+
+      // Fail-closed: Never show raw screenshot in preview
+      if (screenshotPreview) {
+        screenshotPreview.style.display = "none";
+        screenshotPreview.src = "";
+      }
+      if (visualStatus) {
+        visualStatus.textContent = `Redaction failed: ${err.message || err}. Screenshot withheld for privacy.`;
+        visualStatus.style.color = "#c62828";
+        visualStatus.style.display = "block";
+      }
 
       if (privacyStatus) {
         privacyStatus.textContent = `Redaction failed: ${err.message || err}`;
@@ -862,12 +913,14 @@ document.addEventListener("DOMContentLoaded", () => {
               if (typeof callback === "function") callback(null, err);
             } else {
               if (visualStatus) {
-                visualStatus.textContent = "Screenshot captured locally (client-side only)";
-                visualStatus.style.color = "#2e7d32";
+                visualStatus.textContent = "Screenshot captured locally. Applying visual privacy redaction...";
+                visualStatus.style.color = "#1565c0";
+                visualStatus.style.display = "block";
               }
               if (screenshotPreview) {
-                screenshotPreview.src = dataUrl;
-                screenshotPreview.style.display = "block";
+                // Keep hidden until sanitized/masked copy is produced by triggerRedaction
+                screenshotPreview.style.display = "none";
+                screenshotPreview.src = "";
               }
               latestScreenshotDataUrl = dataUrl;
 
@@ -915,14 +968,16 @@ document.addEventListener("DOMContentLoaded", () => {
       const t1 = performance.now();
       timing.screenshotMs = Math.round(t1 - t0);
 
-      // 2. Successful capture: render local preview, trigger OCR pipeline, and trigger vision classification
+      // 2. Successful capture: keep raw screenshot offscreen and trigger local perception pipelines
       if (visualStatus) {
-        visualStatus.textContent = "Screenshot captured locally (client-side only)";
-        visualStatus.style.color = "#2e7d32";
+        visualStatus.textContent = "Screenshot captured locally. Applying visual privacy redaction...";
+        visualStatus.style.color = "#1565c0";
+        visualStatus.style.display = "block";
       }
       if (screenshotPreview) {
-        screenshotPreview.src = response.dataUrl;
-        screenshotPreview.style.display = "block";
+        // Keep hidden until sanitized/masked copy is produced by triggerRedaction
+        screenshotPreview.style.display = "none";
+        screenshotPreview.src = "";
       }
       latestScreenshotDataUrl = response.dataUrl;
 
@@ -3472,99 +3527,28 @@ document.addEventListener("DOMContentLoaded", () => {
     resetPipelineState();
 
     try {
-      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      updatePipelineStage("PERCEPTION", "active", "Capturing on-device perception...");
+      if (agentTaskText) agentTaskText.textContent = "Observation Only (Capture Local)";
+      if (agentExecutionStatus) agentExecutionStatus.textContent = "Perceiving locally...";
+      if (agentSafetyStatus) agentSafetyStatus.textContent = "OBSERVATION ONLY";
 
-      if (!tab || !tab.id) {
-        if (outputArea) outputArea.value = "Error: No active tab found.";
-        if (visualStatus) {
-          visualStatus.textContent = "Screenshot capture failed (no active tab)";
-          visualStatus.style.color = "#c62828";
-        }
-        return;
-      }
+      // Execute the exact same unified on-device perception pipeline as agent execution
+      const pipelineOutput = await runLocalPipeline();
+      const { tab, pageData, redactionResult } = pipelineOutput;
 
-      if (tab.url && (tab.url.startsWith("chrome://") || tab.url.startsWith("edge://") || tab.url.startsWith("about:"))) {
-        if (outputArea) {
-          outputArea.value = "Cannot capture Chrome/browser system pages.\nPlease test on a standard webpage (e.g. https://example.com).";
-        }
-        if (visualStatus) {
-          visualStatus.textContent = "Screenshot capture failed (restricted browser system page)";
-          visualStatus.style.color = "#c62828";
-        }
-        return;
-      }
+      // Update panel with local perception metrics (exact same as agent execution path)
+      if (agentScreenshotStatus) agentScreenshotStatus.textContent = "CAPTURED LOCALLY (Client-Side Only)";
+      if (agentDomPiiCount) agentDomPiiCount.textContent = latestSensitiveRegions ? latestSensitiveRegions.length : 0;
+      if (agentOcrPiiCount) agentOcrPiiCount.textContent = latestOcrSensitiveRegions ? latestOcrSensitiveRegions.length : 0;
+      if (agentSensitiveCount) agentSensitiveCount.textContent = latestMergedRegions ? latestMergedRegions.length : 0;
 
-      // Milestone 7: Trigger local visual context capture
-      captureVisualContext();
+      if (previewDomCount) previewDomCount.textContent = `${latestVisualElements ? latestVisualElements.length : 0} elements`;
+      if (previewSensitiveCount) previewSensitiveCount.textContent = String(latestMergedRegions ? latestMergedRegions.length : (latestSensitiveRegions ? latestSensitiveRegions.length : 0));
+      if (previewRedactionStatus) previewRedactionStatus.textContent = (redactionResult && redactionResult.success) ? "ACTIVE" : "WITHHELD";
+      updatePipelineStage("PERCEPTION", "completed", `${latestVisualElements ? latestVisualElements.length : 0} DOM items`);
 
-      // Display response helper for Milestone 1-6 flow
-      const displayResponse = async (data, domElapsedMs) => {
-        if (data && data.success) {
-          timing.domExtractionMs = domElapsedMs;
-          timing.sensitiveRegionDetectionMs = typeof data.sensitiveDetectionMs === "number"
-            ? data.sensitiveDetectionMs
-            : 0;
-
-          latestVisualElements = data.visualElements || [];
-          latestSensitiveRegions = data.sensitiveRegions || [];
-          latestPageData = data;
-
-          triggerRedaction();
-
-          if (outputArea) outputArea.value = `Title: ${data.title}\nURL: ${data.url}`;
-          if (sampleOutput) sampleOutput.value = data.redactedSample || "(No visible text found on page)";
-
-          if (elementsOutput) {
-            if (data.visualElements && Array.isArray(data.visualElements) && data.visualElements.length > 0) {
-              let elementsText = `Detected elements: ${data.visualElements.length}\n\n`;
-              data.visualElements.forEach((el, index) => {
-                const typeUpper = (el.type || "ELEMENT").toUpperCase();
-                elementsText += `${index + 1}.${typeUpper} — ${el.label} [x:${el.x}, y:${el.y}, w:${el.width}, h:${el.height}]\n`;
-              });
-              elementsOutput.value = elementsText.trim();
-            } else {
-              elementsOutput.value = "No visual elements detected.";
-            }
-          }
-
-          renderPerceptionSummary();
-
-          // Send ONLY sanitized text data to /api/context (Milestone 3-6)
-          await executeTextOnlyFallback(tab, data, "Triggered via Capture Page Info button");
-        } else {
-          if (outputArea) outputArea.value = "Failed to retrieve page info.";
-          if (backendOutput) backendOutput.value = "Transmission skipped (no context available).";
-          renderPerceptionSummary();
-        }
-      };
-
-      const tDomStart = performance.now();
-
-      chrome.tabs.sendMessage(tab.id, { action: "getPageInfo" }, async (response) => {
-        if (chrome.runtime.lastError) {
-          try {
-            await chrome.scripting.executeScript({
-              target: { tabId: tab.id },
-              files: ["pii-detector.js", "content.js"]
-            });
-
-            chrome.tabs.sendMessage(tab.id, { action: "getPageInfo" }, async (retryResponse) => {
-              const domElapsed = Math.round(performance.now() - tDomStart);
-              if (chrome.runtime.lastError) {
-                if (outputArea) outputArea.value = `Error: ${chrome.runtime.lastError.message}`;
-              } else {
-                await displayResponse(retryResponse, domElapsed);
-              }
-            });
-          } catch (injectError) {
-            if (outputArea) outputArea.value = `Error injecting scripts: ${injectError.message}`;
-          }
-          return;
-        }
-
-        const domElapsed = Math.round(performance.now() - tDomStart);
-        await displayResponse(response, domElapsed);
-      });
+      // Observation only fallback to backend context (Observation ≠ Action policy enforced)
+      await executeTextOnlyFallback(tab, pageData, "Triggered via Capture Local button");
     } catch (err) {
       if (outputArea) outputArea.value = `Unexpected error: ${err.message}`;
       if (visualStatus) {
