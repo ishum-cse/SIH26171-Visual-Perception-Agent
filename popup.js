@@ -409,6 +409,7 @@ document.addEventListener("DOMContentLoaded", () => {
   let latestSensitiveRegions = null;
   let latestOcrSensitiveRegions = [];
   let latestOcrWordCount = 0;
+  let latestOcrResult = null;
   let latestMergedRegions = null;
   let latestVisionResult = null;
   let latestVisionPromise = null;
@@ -492,6 +493,11 @@ document.addEventListener("DOMContentLoaded", () => {
     const t0 = performance.now();
     let fused = null;
     if (window.SIHFusion && typeof window.SIHFusion.buildLocalPerception === "function") {
+      const tabViewport = (latestPageData && latestPageData.viewport) ? latestPageData.viewport : null;
+      const vpWidth = (tabViewport && tabViewport.width) || (latestScreenshotDims && latestScreenshotDims.width) || (typeof window !== "undefined" && window.innerWidth ? window.innerWidth : 1280);
+      const vpHeight = (tabViewport && tabViewport.height) || (latestScreenshotDims && latestScreenshotDims.height) || (typeof window !== "undefined" && window.innerHeight ? window.innerHeight : 800);
+      const dpr = (typeof window !== "undefined" && window.devicePixelRatio) ? window.devicePixelRatio : 1.0;
+
       fused = window.SIHFusion.buildLocalPerception(
         latestVisualElements,
         latestVisionResult,
@@ -500,7 +506,13 @@ document.addEventListener("DOMContentLoaded", () => {
         {
           ocrTextRegionCount: latestOcrWordCount,
           ocrSensitiveRegionCount: latestOcrSensitiveRegions.length,
-          totalRedactedRegionCount: latestMergedRegions ? latestMergedRegions.length : 0
+          totalRedactedRegionCount: latestMergedRegions ? latestMergedRegions.length : 0,
+          words: (latestOcrResult && latestOcrResult.words) ? latestOcrResult.words : []
+        },
+        {
+          viewport: { width: vpWidth, height: vpHeight },
+          dpr: dpr,
+          screenshotDimensions: latestScreenshotDims
         }
       );
     }
@@ -736,6 +748,7 @@ document.addEventListener("DOMContentLoaded", () => {
       }
 
       const ocrResult = await window.SIHOCR.runOcr(dataUrl);
+      latestOcrResult = ocrResult;
 
       if (ocrResult && ocrResult.success) {
         timing.ocrInitMs = ocrResult.initTimeMs;
@@ -1052,6 +1065,7 @@ document.addEventListener("DOMContentLoaded", () => {
     latestSensitiveRegions = null;
     latestOcrSensitiveRegions = [];
     latestOcrWordCount = 0;
+    latestOcrResult = null;
     latestMergedRegions = null;
     latestVisionResult = null;
     latestVisionPromise = null;
