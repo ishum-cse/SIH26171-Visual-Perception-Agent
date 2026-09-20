@@ -38,36 +38,51 @@ const centralizedPerceptionState = {
 function computeSpatialOverlap(domBox, visBox, viewport = { width: 1280, height: 800 }) {
   if (!domBox || !visBox) return 0;
 
-  // Scale normalized coordinates [0, 1] to pixel space if needed
-  let vx = visBox.x;
-  let vy = visBox.y;
-  let vw = visBox.width;
-  let vh = visBox.height;
+  const calcOverlap = (d, v) => {
+    const xOverlap = Math.max(0, Math.min(d.x + d.width, v.x + v.width) - Math.max(d.x, v.x));
+    const yOverlap = Math.max(0, Math.min(d.y + d.height, v.y + v.height) - Math.max(d.y, v.y));
+    const intersectionArea = xOverlap * yOverlap;
+    if (intersectionArea <= 0) return 0;
+    const domArea = Math.max(1, d.width * d.height);
+    const visArea = Math.max(1, v.width * v.height);
+    const minArea = Math.min(domArea, visArea);
+    const ioMin = intersectionArea / minArea;
+    const unionArea = domArea + visArea - intersectionArea;
+    const iou = intersectionArea / Math.max(1, unionArea);
+    return Math.max(iou, ioMin * 0.75);
+  };
 
-  if (vw <= 1.0 && vh <= 1.0 && viewport.width > 0 && viewport.height > 0) {
-    vx = Math.round(vx * viewport.width);
-    vy = Math.round(vy * viewport.height);
-    vw = Math.round(vw * viewport.width);
-    vh = Math.round(vh * viewport.height);
+  // 1. First test direct overlap without scaling
+  const direct = calcOverlap(domBox, visBox);
+  if (direct > 0) return direct;
+
+  // 2. Normalized [0, 1] scaling
+  if (visBox.width <= 1.0 && visBox.height <= 1.0 && viewport.width > 0 && viewport.height > 0) {
+    const vNorm = {
+      x: Math.round(visBox.x * viewport.width),
+      y: Math.round(visBox.y * viewport.height),
+      width: Math.round(visBox.width * viewport.width),
+      height: Math.round(visBox.height * viewport.height)
+    };
+    return calcOverlap(domBox, vNorm);
   }
 
-  const xOverlap = Math.max(0, Math.min(domBox.x + domBox.width, vx + vw) - Math.max(domBox.x, vx));
-  const yOverlap = Math.max(0, Math.min(domBox.y + domBox.height, vy + vh) - Math.max(domBox.y, vy));
-  const intersectionArea = xOverlap * yOverlap;
+  // 3. 224x224 thumbnail scaling (when visBox is in 224x224 space but domBox is in viewport space)
+  if (visBox.x + visBox.width <= 224 && visBox.y + visBox.height <= 224 && (domBox.x + domBox.width > 224 || domBox.y + domBox.height > 224)) {
+    const vpW = (viewport && viewport.width > 0) ? viewport.width : 1280;
+    const vpH = (viewport && viewport.height > 0) ? viewport.height : 800;
+    const sX = vpW / 224;
+    const sY = vpH / 224;
+    const vThumb = {
+      x: Math.round(visBox.x * sX),
+      y: Math.round(visBox.y * sY),
+      width: Math.round(visBox.width * sX),
+      height: Math.round(visBox.height * sY)
+    };
+    return calcOverlap(domBox, vThumb);
+  }
 
-  if (intersectionArea <= 0) return 0;
-
-  const domArea = Math.max(1, domBox.width * domBox.height);
-  const visArea = Math.max(1, vw * vh);
-  const minArea = Math.min(domArea, visArea);
-
-  // Intersection over min area (IoMin) captures contained elements nicely
-  const ioMin = intersectionArea / minArea;
-  // Intersection over union (IoU)
-  const unionArea = domArea + visArea - intersectionArea;
-  const iou = intersectionArea / Math.max(1, unionArea);
-
-  return Math.max(iou, ioMin * 0.75);
+  return 0;
 }
 
 /**
@@ -80,9 +95,13 @@ function computeSpatialOverlap(domBox, visBox, viewport = { width: 1280, height:
  */
 function fuseVisualAndDOMResults(domElements = [], visualDetections = [], ocrWords = []) {
   const domList = Array.isArray(domElements) ? domElements : [];
-  const visList = Array.isArray(visualDetections) ? visualDetections : [];
+  let visList = Array.isArray(visualDetections) ? visualDetections : [];
+  if (visList.length === 0 && Array.isArray(centralizedPerceptionState.visualDetections) && centralizedPerceptionState.visualDetections.length > 0) {
+    visList = centralizedPerceptionState.visualDetections;
+  }
   const ocrList = Array.isArray(ocrWords) ? ocrWords : [];
 
+  console.log(`[SIH26171][VISION] Fusion input: ${visList.length} visual detections, ${domList.length} DOM elements`);
   console.log(`[SIH26171][VISION] DOM + vision fusion started (${domList.length} DOM, ${visList.length} visual detections)`);
 
   let confirmedCount = 0;
@@ -177,7 +196,23 @@ function fuseVisualAndDOMResults(domElements = [], visualDetections = [], ocrWor
  */
 function buildLocalPerception(visualElements = [], visionResult = null, timing = {}, sensitiveRegionCount = null, ocrStats = null) {
   const elements = Array.isArray(visualElements) ? visualElements : [];
-  const visDetections = (visionResult && Array.isArray(visionResult.detections)) ? visionResult.detections : [];
+  let visDetections = [];
+  if (visionResult) {
+    if (Array.isArray(visionResult)) {
+      visDetections = visionResult;
+    } else if (Array.isArray(visionResult.detections)) {
+      visDetections = visionResult.detections;
+    } else if (Array.isArray(visionResult.visualDetections)) {
+      visDetections = visionResult.visualDetections;
+    } else if (visionResult.detections && Array.isArray(visionResult.detections.detections)) {
+      visDetections = visionResult.detections.detections;
+    } else if (Array.isArray(visionResult.regions)) {
+      visDetections = visionResult.regions;
+    }
+  }
+  if (visDetections.length === 0 && Array.isArray(centralizedPerceptionState.visualDetections) && centralizedPerceptionState.visualDetections.length > 0) {
+    visDetections = centralizedPerceptionState.visualDetections;
+  }
   const ocrWords = (ocrStats && Array.isArray(ocrStats.words)) ? ocrStats.words : [];
 
   // Group elements by UI type

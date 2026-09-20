@@ -411,6 +411,7 @@ document.addEventListener("DOMContentLoaded", () => {
   let latestOcrWordCount = 0;
   let latestMergedRegions = null;
   let latestVisionResult = null;
+  let latestVisionPromise = null;
   let latestFusedElements = null;
   let lastScreenSignature = null;
   let latestSanitizedDataUrl = null;
@@ -784,12 +785,31 @@ document.addEventListener("DOMContentLoaded", () => {
 
       const resizedImageData = await resizeScreenshotTo224(dataUrl);
 
+      const tabViewport = (latestPageData && latestPageData.viewport) ? latestPageData.viewport : null;
+      const vpWidth = (tabViewport && tabViewport.width) || (latestScreenshotDims && latestScreenshotDims.width) || (typeof window !== "undefined" && window.innerWidth ? window.innerWidth : 1280);
+      const vpHeight = (tabViewport && tabViewport.height) || (latestScreenshotDims && latestScreenshotDims.height) || (typeof window !== "undefined" && window.innerHeight ? window.innerHeight : 800);
+
+      const visionOptions = {
+        viewport: { width: vpWidth, height: vpHeight },
+        scaleX: vpWidth / 224,
+        scaleY: vpHeight / 224
+      };
+
       const t0 = performance.now();
-      const result = await window.SIHVision.runVisionInference(resizedImageData);
+      const result = await window.SIHVision.runVisionInference(resizedImageData, visionOptions);
       const t1 = performance.now();
       const latencyMs = Math.round(t1 - t0);
       timing.visionInferenceMs = latencyMs;
       latestVisionResult = result;
+
+      // Update centralized perception state with local visual detections
+      if (window.SIHFusion && typeof window.SIHFusion.updatePerceptionState === "function" && result && result.detections) {
+        window.SIHFusion.updatePerceptionState({
+          visualDetections: result.detections
+        });
+      }
+
+      console.log(`[SIH26171][VISION] Popup vision result: ${result && result.detections ? result.detections.length : 0} detections`);
 
       visionStatus.textContent = "Vision inference completed (on-device)";
       visionStatus.style.color = "#2e7d32";
@@ -814,6 +834,8 @@ document.addEventListener("DOMContentLoaded", () => {
         visionConfidence.textContent = `${pctStr} (${confVal.toFixed(4)})`;
       }
       if (visionDetails) visionDetails.style.display = "block";
+      renderPerceptionSummary();
+      return result;
     } catch (err) {
       console.warn("[SIH26171][VISION] Local vision inference notice:", err.message || err);
       console.log("[SIH26171][VISION] Falling back to DOM perception");
@@ -832,9 +854,9 @@ document.addEventListener("DOMContentLoaded", () => {
       if (visionFusionStatus) visionFusionStatus.textContent = "DOM FALLBACK";
       if (visionDetails) visionDetails.style.display = "block";
       latestVisionResult = null;
+      renderPerceptionSummary();
+      return null;
     }
-
-    renderPerceptionSummary();
   };
 
   // Helper to capture a screenshot data URL locally via background worker with tab/window fallback
@@ -938,7 +960,7 @@ document.addEventListener("DOMContentLoaded", () => {
               triggerOcrPipeline(dataUrl);
 
               // Trigger on-device vision classification
-              triggerVisionClassification(dataUrl);
+              latestVisionPromise = triggerVisionClassification(dataUrl);
 
               if (typeof callback === "function") callback(dataUrl, null);
             }
@@ -1016,7 +1038,7 @@ document.addEventListener("DOMContentLoaded", () => {
       triggerOcrPipeline(response.dataUrl);
 
       // Milestone 9: Trigger on-device vision classification
-      triggerVisionClassification(response.dataUrl);
+      latestVisionPromise = triggerVisionClassification(response.dataUrl);
 
       if (typeof onScreenshotReady === "function") onScreenshotReady(response.dataUrl, null);
     });
@@ -1032,6 +1054,7 @@ document.addEventListener("DOMContentLoaded", () => {
     latestOcrWordCount = 0;
     latestMergedRegions = null;
     latestVisionResult = null;
+    latestVisionPromise = null;
     latestFusedElements = null;
     if (window.SIHFusion && typeof window.SIHFusion.invalidatePerception === "function") {
       window.SIHFusion.invalidatePerception("Pipeline state reset for new pass");
@@ -1396,12 +1419,16 @@ document.addEventListener("DOMContentLoaded", () => {
             // Trigger redaction if screenshot + OCR are already settled
             triggerRedaction();
 
-            // Await redaction completion (M11 + M12)
-            waitForRedaction().then((redactionRes) => {
+            // Await both redaction and vision inference before resolving local perception
+            Promise.allSettled([
+              waitForRedaction(),
+              latestVisionPromise || Promise.resolve(null)
+            ]).then(([redactionSettled]) => {
+              renderPerceptionSummary();
               resolve({
                 tab,
                 pageData: response,
-                redactionResult: redactionRes
+                redactionResult: redactionSettled && redactionSettled.status === "fulfilled" ? redactionSettled.value : null
               });
             });
           } else {
