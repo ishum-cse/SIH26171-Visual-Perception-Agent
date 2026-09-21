@@ -1,0 +1,371 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>M21.3 Controlled Recovery Test Page</title>
+  <style>
+    * {
+      box-sizing: border-box;
+    }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+      margin: 0;
+      padding: 40px 20px;
+      background-color: #f1f5f9;
+      color: #0f172a;
+      display: flex;
+      justify-content: center;
+      align-items: flex-start;
+      min-height: 100vh;
+    }
+    .container {
+      width: 100%;
+      max-width: 640px;
+      background: #ffffff;
+      border: 1px solid #e2e8f0;
+      border-radius: 12px;
+      padding: 32px;
+      box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -2px rgba(0, 0, 0, 0.05);
+    }
+    .badge {
+      display: inline-block;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      padding: 4px 8px;
+      border-radius: 4px;
+      background: #e0f2fe;
+      color: #0369a1;
+      margin-bottom: 8px;
+    }
+    h1 {
+      font-size: 22px;
+      font-weight: 700;
+      margin: 0 0 8px 0;
+      color: #0f172a;
+    }
+    p.description {
+      font-size: 14px;
+      line-height: 1.5;
+      color: #475569;
+      margin: 0 0 24px 0;
+    }
+    .instruction-box {
+      background: #f8fafc;
+      border-left: 4px solid #3b82f6;
+      border-radius: 0 8px 8px 0;
+      padding: 14px 16px;
+      margin-bottom: 24px;
+      font-size: 13px;
+      color: #334155;
+      line-height: 1.5;
+    }
+    .instruction-box ol {
+      margin: 8px 0 0 0;
+      padding-left: 18px;
+    }
+    .instruction-box li {
+      margin-bottom: 4px;
+    }
+    .control-panel {
+      background: #f8fafc;
+      border: 1px solid #e2e8f0;
+      border-radius: 8px;
+      padding: 16px;
+      margin-bottom: 24px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .control-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+    }
+    .toggle-label {
+      font-size: 13px;
+      font-weight: 600;
+      color: #1e293b;
+    }
+    .btn-secondary {
+      background: #64748b;
+      color: #ffffff;
+      border: none;
+      border-radius: 6px;
+      padding: 8px 14px;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.15s ease;
+    }
+    .btn-secondary:hover {
+      background: #475569;
+    }
+    .stage-area {
+      border: 2px dashed #cbd5e1;
+      border-radius: 8px;
+      padding: 30px 20px;
+      background: #ffffff;
+      min-height: 140px;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      gap: 16px;
+      position: relative;
+    }
+    .slot-box {
+      width: 100%;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 50px;
+    }
+    .action-btn {
+      background: #2563eb;
+      color: #ffffff;
+      border: none;
+      border-radius: 6px;
+      padding: 12px 28px;
+      font-size: 15px;
+      font-weight: 600;
+      cursor: pointer;
+      box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+      transition: background 0.15s ease, transform 0.05s ease;
+    }
+    .action-btn:hover {
+      background: #1d4ed8;
+    }
+    .action-btn:active {
+      transform: scale(0.98);
+    }
+    .success-card {
+      display: none;
+      width: 100%;
+      background: #ecfdf5;
+      border: 1px solid #6ee7b7;
+      border-radius: 8px;
+      padding: 16px;
+      margin-top: 24px;
+      text-align: center;
+      animation: fadeIn 0.25s ease-out;
+    }
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(4px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    .success-card h2 {
+      margin: 0 0 6px 0;
+      color: #065f46;
+      font-size: 18px;
+      font-weight: 700;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      gap: 8px;
+    }
+    .success-card p {
+      margin: 0;
+      font-size: 13.5px;
+      color: #047857;
+    }
+    .telemetry-panel {
+      margin-top: 20px;
+      border-top: 1px solid #e2e8f0;
+      padding-top: 16px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 12px;
+      color: #475569;
+    }
+    .telemetry-row {
+      display: flex;
+      justify-content: space-between;
+      margin-bottom: 4px;
+    }
+    .telemetry-value {
+      font-weight: 600;
+      color: #0f172a;
+    }
+  </style>
+</head>
+<body>
+
+  <div class="container">
+    <span class="badge">Milestone 21.3</span>
+    <h1>Controlled Recovery Test Page</h1>
+    <p class="description">
+      Deterministic test environment for controlled recovery when a target button reference becomes stale between perception and execution.
+    </p>
+
+    <div class="instruction-box">
+      <strong>How to test:</strong>
+      <ol>
+        <li>Click <strong>"Replace with Stale Target"</strong> below, or let the page run in Auto-Drift mode.</li>
+        <li>The original button DOM node is removed/detached, and a fresh <strong>"Continue"</strong> button is rendered in a new container.</li>
+        <li>Instruct the agent: <code>click the continue button</code>.</li>
+        <li>The agent detects any stale DOM reference, performs fresh perception, re-grounds the target, and verifies completion.</li>
+      </ol>
+    </div>
+
+    <div class="control-panel">
+      <div class="control-row">
+        <span class="toggle-label">Target State: <span id="targetStateText" style="color: #2563eb;">Initial Target (Slot A)</span></span>
+        <button id="toggleStaleBtn" class="btn-secondary" type="button">Replace with Stale Target</button>
+      </div>
+      <div class="control-row" style="font-size: 12px; color: #64748b;">
+        <span>Auto-drift on observation:</span>
+        <label style="cursor: pointer; display: flex; align-items: center; gap: 6px;">
+          <input type="checkbox" id="autoDriftCheckbox">
+          <span>Drift after 1.5s</span>
+        </label>
+      </div>
+    </div>
+
+    <div class="stage-area" id="stageArea">
+      <!-- Slot A: Initial location -->
+      <div id="slotA" class="slot-box">
+        <button id="initialContinueBtn" class="action-btn" role="button">
+          Continue
+        </button>
+      </div>
+
+      <!-- Slot B: Replacement location -->
+      <div id="slotB" class="slot-box" style="display: none;"></div>
+    </div>
+
+    <!-- Visible success indicator -->
+    <div id="successCard" class="success-card">
+      <h2 id="recoverySuccessTitle">
+        <span>&#10003;</span> Recovery successful
+      </h2>
+      <p id="recoverySuccessMessage">
+        The current "Continue" button was successfully clicked and verified.
+      </p>
+    </div>
+
+    <div class="telemetry-panel">
+      <div class="telemetry-row">
+        <span>Live Element ID:</span>
+        <span class="telemetry-value" id="liveElementId">initialContinueBtn</span>
+      </div>
+      <div class="telemetry-row">
+        <span>DOM Relocations:</span>
+        <span class="telemetry-value" id="relocationCount">0</span>
+      </div>
+      <div class="telemetry-row">
+        <span>Click Count:</span>
+        <span class="telemetry-value" id="clickCounter">0</span>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    (function () {
+      let isStaleReplaced = false;
+      let clickCount = 0;
+      let relocationCount = 0;
+
+      const slotA = document.getElementById("slotA");
+      const slotB = document.getElementById("slotB");
+      const toggleBtn = document.getElementById("toggleStaleBtn");
+      const targetStateText = document.getElementById("targetStateText");
+      const successCard = document.getElementById("successCard");
+      const clickCounter = document.getElementById("clickCounter");
+      const relocationCountEl = document.getElementById("relocationCount");
+      const liveElementId = document.getElementById("liveElementId");
+      const autoDriftCheckbox = document.getElementById("autoDriftCheckbox");
+
+      function handleContinueClick(e) {
+        clickCount++;
+        clickCounter.textContent = clickCount;
+
+        // Display visible success indicator
+        successCard.style.display = "block";
+        const messageEl = document.getElementById("recoverySuccessMessage");
+        if (isStaleReplaced) {
+          messageEl.textContent = `Recovery successful! Re-grounded button (ID: ${e.target.id}) was safely clicked.`;
+        } else {
+          messageEl.textContent = `Button (ID: ${e.target.id}) clicked successfully.`;
+        }
+      }
+
+      function attachHandler(btn) {
+        btn.addEventListener("click", handleContinueClick);
+      }
+
+      // Initial button setup
+      const initialBtn = document.getElementById("initialContinueBtn");
+      if (initialBtn) {
+        attachHandler(initialBtn);
+      }
+
+      function triggerTargetReplacement() {
+        isStaleReplaced = !isStaleReplaced;
+        relocationCount++;
+        relocationCountEl.textContent = relocationCount;
+        successCard.style.display = "none";
+
+        if (isStaleReplaced) {
+          // Remove old button node from Slot A completely
+          slotA.innerHTML = "";
+          slotA.style.display = "none";
+
+          // Create fresh "Continue" button in Slot B with new DOM reference & ID
+          slotB.style.display = "flex";
+          slotB.innerHTML = "";
+
+          const freshBtn = document.createElement("button");
+          freshBtn.id = "freshContinueBtn_" + relocationCount;
+          freshBtn.className = "action-btn";
+          freshBtn.setAttribute("role", "button");
+          freshBtn.textContent = "Continue";
+          attachHandler(freshBtn);
+
+          slotB.appendChild(freshBtn);
+
+          targetStateText.textContent = `Target Replaced (Slot B - ID: ${freshBtn.id})`;
+          targetStateText.style.color = "#d97706";
+          liveElementId.textContent = freshBtn.id;
+          toggleBtn.textContent = "Reset to Original Target";
+        } else {
+          // Reset to Slot A
+          slotB.innerHTML = "";
+          slotB.style.display = "none";
+
+          slotA.style.display = "flex";
+          slotA.innerHTML = "";
+
+          const resetBtn = document.createElement("button");
+          resetBtn.id = "initialContinueBtn";
+          resetBtn.className = "action-btn";
+          resetBtn.setAttribute("role", "button");
+          resetBtn.textContent = "Continue";
+          attachHandler(resetBtn);
+
+          slotA.appendChild(resetBtn);
+
+          targetStateText.textContent = "Initial Target (Slot A)";
+          targetStateText.style.color = "#2563eb";
+          liveElementId.textContent = resetBtn.id;
+          toggleBtn.textContent = "Replace with Stale Target";
+        }
+      }
+
+      toggleBtn.addEventListener("click", triggerTargetReplacement);
+
+      autoDriftCheckbox.addEventListener("change", () => {
+        if (autoDriftCheckbox.checked && !isStaleReplaced) {
+          setTimeout(() => {
+            if (autoDriftCheckbox.checked && !isStaleReplaced) {
+              triggerTargetReplacement();
+            }
+          }, 1500);
+        }
+      });
+    })();
+  </script>
+</body>
+</html>

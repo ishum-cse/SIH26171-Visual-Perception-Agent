@@ -80,9 +80,151 @@ function labelsMatch(a, b) {
 }
 
 /**
+ * M23: Finds a container or section element matching context description.
+ * Searches headings, section tags, aria-labels, roles, and structural containers.
+ * @param {string} contextDesc
+ * @returns {Element|null}
+ */
+function findContextElement(contextDesc) {
+  if (!contextDesc || typeof contextDesc !== "string") return null;
+  const normCtx = normalizeLabel(contextDesc);
+  if (!normCtx) return null;
+
+  // 1. Containers with matching aria-label, title, id, or className
+  const containers = Array.from(document.querySelectorAll("section, fieldset, [role='region'], [role='group'], form, div, details, aside, nav, article, [data-section]"));
+  for (const container of containers) {
+    if (!getVisibleRect(container)) continue;
+    const ariaLabel = normalizeLabel(container.getAttribute("aria-label") || container.getAttribute("title") || "");
+    if (ariaLabel && (ariaLabel === normCtx || ariaLabel.includes(normCtx) || normCtx.includes(ariaLabel))) {
+      return container;
+    }
+    const idOrClass = normalizeLabel(`${container.id} ${container.className}`);
+    if (idOrClass && (idOrClass.includes(normCtx) || normCtx.includes(idOrClass))) {
+      return container;
+    }
+  }
+
+  // 2. Headings with matching text -> resolve to parent section/container
+  const headings = Array.from(document.querySelectorAll("h1, h2, h3, h4, h5, h6, legend, [role='heading'], summary, strong, b"));
+  for (const heading of headings) {
+    if (!getVisibleRect(heading)) continue;
+    const hText = normalizeLabel(heading.innerText || heading.textContent || "");
+    if (hText && (hText === normCtx || hText.includes(normCtx) || normCtx.includes(hText))) {
+      const parentContainer = heading.closest("section, fieldset, [role='region'], [role='group'], form, .section, .container, .group, div");
+      return parentContainer || heading.parentElement || heading;
+    }
+  }
+
+  // 3. Fallback: visual element matching context label -> resolve to its container
+  const allVisual = extractVisualElementsWithNodes();
+  for (const item of allVisual) {
+    if (item.node && item.node.isConnected && labelsMatch(item.label, contextDesc)) {
+      const parentContainer = item.node.closest("section, fieldset, [role='region'], [role='group'], form, div") || item.node.parentElement;
+      return parentContainer || item.node;
+    }
+  }
+
+  return null;
+}
+
+/**
+ * M23: Filters candidate elements to those contained within or associated with contextElement.
+ * Uses both DOM tree containment and spatial layout containment.
+ * @param {Array<Object>} candidates
+ * @param {Element} contextEl
+ * @returns {Array<Object>}
+ */
+function filterCandidatesByContext(candidates, contextEl) {
+  if (!contextEl || !Array.isArray(candidates)) return candidates;
+  const ctxRect = typeof contextEl.getBoundingClientRect === "function" ? getVisibleRect(contextEl) : null;
+  return candidates.filter(cand => {
+    if (!cand || !cand.node || !cand.node.isConnected) return false;
+    // 1. Direct DOM containment
+    if (contextEl.contains(cand.node) && cand.node !== contextEl) {
+      return true;
+    }
+    // 2. Spatial bounding box containment with margin tolerance
+    if (ctxRect && cand.bounds) {
+      const b = cand.bounds;
+      const isInside = b.x >= ctxRect.x - 20 &&
+                       b.y >= ctxRect.y - 20 &&
+                       (b.x + b.width) <= (ctxRect.x + ctxRect.width + 20) &&
+                       (b.y + b.height) <= (ctxRect.y + ctxRect.height + 20);
+      if (isInside) return true;
+    }
+    return false;
+  });
+}
+
+/**
+ * M23: Resolves candidate elements within context, with hierarchical upward container expansion.
+ * If candidates matching targetLabel are not directly inside contextEl (e.g. context was a heading
+ * or a sibling sub-group inside a shared section/form/container), traverses upward to enclosing containers.
+ * @param {Array<Object>} candidates
+ * @param {Element} contextEl
+ * @param {string} [targetLabel=""]
+ * @returns {Array<Object>}
+ */
+function resolveContextualCandidates(candidates, contextEl, targetLabel = "") {
+  if (!contextEl || !Array.isArray(candidates)) return candidates;
+  const scoped = filterCandidatesByContext(candidates, contextEl);
+  if (!targetLabel) return scoped;
+
+  const directMatches = scoped.filter(el => el.node && el.node.isConnected && labelsMatch(el.label, targetLabel));
+  if (directMatches.length > 0) {
+    return scoped;
+  }
+
+  // Hierarchical upward container expansion:
+  // If contextEl was a sub-element (e.g., heading, inner label, or sub-group div),
+  // search enclosing sections/fieldsets/forms/containers.
+  let curr = contextEl;
+  while (curr && (typeof document === "undefined" || curr !== document.body)) {
+    const parent = curr.parentElement;
+    if (!parent) break;
+    const parentContainer = (parent.closest && parent.closest("section, fieldset, [role='region'], [role='group'], form, .section, .container, .sidebar, [data-section], main, article, aside, div")) || parent;
+    const expCandidates = filterCandidatesByContext(candidates, parentContainer);
+    const expMatches = expCandidates.filter(el => el.node && el.node.isConnected && labelsMatch(el.label, targetLabel));
+    if (expMatches.length > 0) {
+      return expCandidates;
+    }
+    curr = parentContainer;
+  }
+
+  return scoped;
+}
+
+/**
+ * M23: Selects candidate based on ordinal rank (1 = first, 2 = second, -1 = last).
+ * Candidates are ordered geometrically in natural reading order (y top-to-bottom, x left-to-right).
+ * @param {Array<Object>} candidates
+ * @param {number} ordinal
+ * @returns {Object|null}
+ */
+function selectOrdinalCandidate(candidates, ordinal) {
+  if (!Array.isArray(candidates) || candidates.length === 0) return null;
+  if (typeof ordinal !== "number") return null;
+
+  const sorted = candidates.slice().sort((a, b) => {
+    const yDiff = (a.y || 0) - (b.y || 0);
+    if (Math.abs(yDiff) > 15) return yDiff;
+    return (a.x || 0) - (b.x || 0);
+  });
+
+  if (ordinal === -1) {
+    return sorted[sorted.length - 1];
+  }
+  const idx = ordinal - 1;
+  if (idx >= 0 && idx < sorted.length) {
+    return sorted[idx];
+  }
+  return null;
+}
+
+/**
  * Safely executes a permitted action on the page if explicitly whitelisted.
  *
- * @param {Object} actionPayload - { action: string, target?: string, amount?: number, targetIndex?: number, targetType?: string, targetLabel?: string, localValue?: string }
+ * @param {Object} actionPayload - { action: string, target?: string, amount?: number, targetIndex?: number, targetType?: string, targetLabel?: string, localValue?: string, context?: string, relation?: string, ordinal?: number }
  * @returns {Object} Execution result summary
  */
 function executeAction(actionPayload) {
@@ -92,8 +234,8 @@ function executeAction(actionPayload) {
 
   const { action, target, amount } = actionPayload;
 
-  // Explicit action allowlist check: exactly {"CLICK", "SCROLL", "FILL", "FILL_FORM", "AUTOFILL", "SUBMIT"} permitted
-  const ALLOWED_ACTIONS = new Set(["CLICK", "SCROLL", "FILL", "FILL_FORM", "AUTOFILL", "SUBMIT"]);
+  // Explicit action allowlist check: permitted actions including M23 additions
+  const ALLOWED_ACTIONS = new Set(["CLICK", "SCROLL", "FILL", "FILL_FORM", "AUTOFILL", "SUBMIT", "CHECK", "UNCHECK", "SELECT", "TOGGLE"]);
   if (!ALLOWED_ACTIONS.has(action)) {
     return {
       executed: false,
@@ -101,8 +243,79 @@ function executeAction(actionPayload) {
     };
   }
 
-  // 1. CLICK Action Execution (Milestone 5, 14 & 15 Generalized Grounding)
+  // 1. CLICK Action Execution (Milestone 5, 14, 15 & M23 Hierarchical Grounding)
   if (action === "CLICK") {
+    // M23 Contextual CLICK path
+    if (actionPayload.context) {
+      const freshElements = extractVisualElementsWithNodes();
+      const ctxEl = findContextElement(actionPayload.context);
+      if (!ctxEl) {
+        return { executed: false, reason: `Context '${actionPayload.context}' not found on page` };
+      }
+      const targetLabel = actionPayload.targetLabel || actionPayload.target || "";
+      const contextualCandidates = resolveContextualCandidates(freshElements, ctxEl, targetLabel);
+      if (contextualCandidates.length === 0) {
+        return { executed: false, reason: `Context mismatch: no candidates found within '${actionPayload.context}'` };
+      }
+
+      let matches = contextualCandidates.filter(
+        (el) => el.node && el.node.isConnected && labelsMatch(el.label, targetLabel)
+      );
+
+      if (actionPayload.targetType) {
+        const typeMatches = matches.filter(el => el.type === actionPayload.targetType || el.role === actionPayload.targetType);
+        if (typeMatches.length > 0) matches = typeMatches;
+      }
+
+      let matched = null;
+      if (typeof actionPayload.ordinal === "number") {
+        matched = selectOrdinalCandidate(matches, actionPayload.ordinal);
+        if (!matched) {
+          return { executed: false, reason: `Ordinal candidate #${actionPayload.ordinal} not found in context` };
+        }
+      } else {
+        if (matches.length > 1) {
+          const exactMatches = matches.filter(c => normalizeLabel(c.label) === normalizeLabel(targetLabel));
+          if (exactMatches.length > 1) {
+            return {
+              executed: false,
+              reason: "Ambiguous target: multiple elements with identical label found on page"
+            };
+          }
+          matched = exactMatches[0] || matches[0];
+        } else if (matches.length === 1) {
+          matched = matches[0];
+        }
+      }
+
+      if (!matched || !matched.node || !matched.node.isConnected) {
+        return { executed: false, reason: `Target '${targetLabel}' not found within '${actionPayload.context}'` };
+      }
+
+      if (matched.node.disabled || matched.node.getAttribute?.("aria-disabled") === "true") {
+        return { executed: false, reason: "Target element is disabled or read-only" };
+      }
+
+      try {
+        if (typeof matched.node.scrollIntoView === "function") {
+          try { matched.node.scrollIntoView({ block: "center", inline: "center", behavior: "instant" }); } catch (_) {}
+        }
+        if (matched.node.tagName && matched.node.tagName.toLowerCase() === "input") {
+          matched.node.focus?.();
+        }
+        matched.node.click();
+        return {
+          executed: true,
+          action: "CLICK",
+          targetType: matched.type || actionPayload.targetType,
+          targetLabel: matched.label || targetLabel,
+          groundedIndex: matched.index
+        };
+      } catch (err) {
+        return { executed: false, reason: `Error during contextual click execution: ${err.message}` };
+      }
+    }
+
     // Generalized grounded path: payload has targetIndex
     if (typeof actionPayload.targetIndex === "number") {
       const { targetIndex, targetType, targetLabel } = actionPayload;
@@ -123,7 +336,7 @@ function executeAction(actionPayload) {
 
       // Check for ambiguous target if multiple elements share identical label
       const matchingCandidates = freshElements.filter(
-        (el) => el.node && el.node.isConnected && (el.type === targetType || ["button", "link", "input", "element"].includes(el.type)) && labelsMatch(el.label, targetLabel)
+        (el) => el.node && el.node.isConnected && (el.type === targetType || ["button", "link", "input", "element", "heading", "tab", "menuitem", "option", "checkbox", "radio", "switch", "select", "section"].includes(el.type)) && labelsMatch(el.label, targetLabel)
       );
       const exactMatches = matchingCandidates.filter(c => normalizeLabel(c.label) === normalizeLabel(targetLabel));
       if (exactMatches.length > 1 && (typeof targetIndex !== "number" || !freshElements[targetIndex] || !labelsMatch(freshElements[targetIndex].label, targetLabel))) {
@@ -136,7 +349,8 @@ function executeAction(actionPayload) {
       let matched = null;
 
       // 1) Best case: index still points at an element of matching type+label.
-      if (freshElements[targetIndex]
+      if (typeof targetIndex === "number"
+          && freshElements[targetIndex]
           && freshElements[targetIndex].node
           && freshElements[targetIndex].node.isConnected
           && labelsMatch(freshElements[targetIndex].label, targetLabel)) {
@@ -198,14 +412,14 @@ function executeAction(actionPayload) {
     const selector = ACTION_TARGET_MAP[target];
     let element = document.querySelector(selector);
 
-    // Fallback: search visible DOM elements matching the pre-registered safe semantic tag
+    // Fallback: search visible DOM elements matching the pre-registered safe semantic tag or label
     if (!element) {
-      const candidates = document.querySelectorAll("button, a[href], input, [role='button']");
+      const candidates = document.querySelectorAll("button, a[href], input, [role='button'], h1, h2, h3, h4, h5, h6, [data-section], section, [role='region'], [role='tab'], [role='option'], [tabindex]");
       for (const cand of candidates) {
         if (!getVisibleRect(cand)) continue;
         const candType = cand.tagName.toLowerCase() === "a" ? "link" : (cand.tagName.toLowerCase() === "input" ? "input" : "button");
-        const candLabel = (cand.innerText || cand.placeholder || cand.getAttribute("aria-label") || "").trim();
-        if (getSemanticTag(candType, candLabel, cand) === target) {
+        const candLabel = (cand.innerText || cand.placeholder || cand.getAttribute("aria-label") || cand.getAttribute("data-section") || "").trim();
+        if (getSemanticTag(candType, candLabel, cand) === target || labelsMatch(candLabel, target)) {
           element = cand;
           break;
         }
@@ -684,7 +898,291 @@ function executeAction(actionPayload) {
     };
   }
 
-  // 5. Unknown / unsupported action type
+  // 5. CHECK Action Execution (Milestone 23 Hierarchical UI Interaction)
+  if (action === "CHECK") {
+    const freshElements = extractVisualElementsWithNodes();
+    let candidates = freshElements;
+    const targetLabel = actionPayload.targetLabel || actionPayload.target || "";
+
+    if (actionPayload.context) {
+      const ctxEl = findContextElement(actionPayload.context);
+      if (!ctxEl) {
+        return { executed: false, reason: `Context '${actionPayload.context}' not found on page` };
+      }
+      candidates = resolveContextualCandidates(freshElements, ctxEl, targetLabel);
+      if (candidates.length === 0) {
+        return { executed: false, reason: `Context mismatch: no candidates found within '${actionPayload.context}'` };
+      }
+    }
+    let matches = candidates.filter(el =>
+      el.node && el.node.isConnected &&
+      (el.type === "checkbox" || el.role === "checkbox" || ((el.node.tagName || "").toLowerCase() === "input" && el.node.type === "checkbox")) &&
+      labelsMatch(el.label, targetLabel)
+    );
+
+    if (matches.length === 0) {
+      matches = candidates.filter(el => el.node && el.node.isConnected && labelsMatch(el.label, targetLabel));
+    }
+
+    let targetItem = null;
+    if (typeof actionPayload.ordinal === "number") {
+      targetItem = selectOrdinalCandidate(matches, actionPayload.ordinal);
+      if (!targetItem) {
+        return { executed: false, reason: `Ordinal candidate #${actionPayload.ordinal} not found in context` };
+      }
+    } else {
+      if (matches.length > 1) {
+        const exact = matches.filter(m => normalizeLabel(m.label) === normalizeLabel(targetLabel));
+        if (exact.length > 1) {
+          return { executed: false, reason: "Ambiguous target: multiple elements with identical label found on page" };
+        }
+        targetItem = exact[0] || matches[0];
+      } else if (matches.length === 1) {
+        targetItem = matches[0];
+      }
+    }
+
+    if (!targetItem || !targetItem.node || !targetItem.node.isConnected) {
+      return { executed: false, reason: `Target checkbox '${targetLabel}' not found on page` };
+    }
+
+    const node = targetItem.node;
+    if (node.disabled || node.getAttribute?.("aria-disabled") === "true") {
+      return { executed: false, reason: "Target element is disabled or read-only" };
+    }
+
+    if (typeof node.scrollIntoView === "function") {
+      try { node.scrollIntoView({ block: "center", inline: "center", behavior: "instant" }); } catch (_) {}
+    }
+
+    const isInput = (node.tagName || "").toLowerCase() === "input";
+    const currentlyChecked = isInput ? Boolean(node.checked) : (node.getAttribute("aria-checked") === "true");
+
+    if (!currentlyChecked) {
+      node.click();
+      node.dispatchEvent?.(new Event("change", { bubbles: true, composed: true }));
+    }
+
+    const verified = isInput ? Boolean(node.checked) : (node.getAttribute("aria-checked") === "true");
+    return {
+      executed: true,
+      action: "CHECK",
+      targetLabel: targetItem.label || targetLabel,
+      targetType: "checkbox",
+      groundedIndex: targetItem.index,
+      verified: verified
+    };
+  }
+
+  // 6. UNCHECK Action Execution (Milestone 23 Hierarchical UI Interaction)
+  if (action === "UNCHECK") {
+    const freshElements = extractVisualElementsWithNodes();
+    let candidates = freshElements;
+    const targetLabel = actionPayload.targetLabel || actionPayload.target || "";
+
+    if (actionPayload.context) {
+      const ctxEl = findContextElement(actionPayload.context);
+      if (!ctxEl) {
+        return { executed: false, reason: `Context '${actionPayload.context}' not found on page` };
+      }
+      candidates = resolveContextualCandidates(freshElements, ctxEl, targetLabel);
+      if (candidates.length === 0) {
+        return { executed: false, reason: `Context mismatch: no candidates found within '${actionPayload.context}'` };
+      }
+    }
+    let matches = candidates.filter(el =>
+      el.node && el.node.isConnected &&
+      (el.type === "checkbox" || el.role === "checkbox" || ((el.node.tagName || "").toLowerCase() === "input" && el.node.type === "checkbox")) &&
+      labelsMatch(el.label, targetLabel)
+    );
+
+    if (matches.length === 0) {
+      matches = candidates.filter(el => el.node && el.node.isConnected && labelsMatch(el.label, targetLabel));
+    }
+
+    let targetItem = null;
+    if (typeof actionPayload.ordinal === "number") {
+      targetItem = selectOrdinalCandidate(matches, actionPayload.ordinal);
+      if (!targetItem) {
+        return { executed: false, reason: `Ordinal candidate #${actionPayload.ordinal} not found in context` };
+      }
+    } else {
+      if (matches.length > 1) {
+        const exact = matches.filter(m => normalizeLabel(m.label) === normalizeLabel(targetLabel));
+        if (exact.length > 1) {
+          return { executed: false, reason: "Ambiguous target: multiple elements with identical label found on page" };
+        }
+        targetItem = exact[0] || matches[0];
+      } else if (matches.length === 1) {
+        targetItem = matches[0];
+      }
+    }
+
+    if (!targetItem || !targetItem.node || !targetItem.node.isConnected) {
+      return { executed: false, reason: `Target checkbox '${targetLabel}' not found on page` };
+    }
+
+    const node = targetItem.node;
+    if (node.disabled || node.getAttribute?.("aria-disabled") === "true") {
+      return { executed: false, reason: "Target element is disabled or read-only" };
+    }
+
+    if (typeof node.scrollIntoView === "function") {
+      try { node.scrollIntoView({ block: "center", inline: "center", behavior: "instant" }); } catch (_) {}
+    }
+
+    const isInput = (node.tagName || "").toLowerCase() === "input";
+    const currentlyChecked = isInput ? Boolean(node.checked) : (node.getAttribute("aria-checked") === "true");
+
+    if (currentlyChecked) {
+      node.click();
+      node.dispatchEvent?.(new Event("change", { bubbles: true, composed: true }));
+    }
+
+    const verified = isInput ? !node.checked : (node.getAttribute("aria-checked") === "false");
+    return {
+      executed: true,
+      action: "UNCHECK",
+      targetLabel: targetItem.label || targetLabel,
+      targetType: "checkbox",
+      groundedIndex: targetItem.index,
+      verified: verified
+    };
+  }
+
+  // 7. SELECT Action Execution (Milestone 23 Hierarchical UI Interaction)
+  if (action === "SELECT") {
+    const freshElements = extractVisualElementsWithNodes();
+    let candidates = freshElements;
+    const targetLabel = actionPayload.targetLabel || actionPayload.target || "";
+
+    if (actionPayload.context) {
+      const ctxEl = findContextElement(actionPayload.context);
+      if (!ctxEl) {
+        return { executed: false, reason: `Context '${actionPayload.context}' not found on page` };
+      }
+      candidates = resolveContextualCandidates(freshElements, ctxEl, targetLabel);
+      if (candidates.length === 0) {
+        return { executed: false, reason: `Context mismatch: no candidates found within '${actionPayload.context}'` };
+      }
+    }
+    let matches = candidates.filter(el => el.node && el.node.isConnected && labelsMatch(el.label, targetLabel));
+
+    let targetItem = null;
+    if (typeof actionPayload.ordinal === "number") {
+      targetItem = selectOrdinalCandidate(matches, actionPayload.ordinal);
+      if (!targetItem) {
+        return { executed: false, reason: `Ordinal candidate #${actionPayload.ordinal} not found in context` };
+      }
+    } else {
+      if (matches.length > 1) {
+        const exact = matches.filter(m => normalizeLabel(m.label) === normalizeLabel(targetLabel));
+        if (exact.length > 1) {
+          return { executed: false, reason: "Ambiguous target: multiple elements with identical label found on page" };
+        }
+        targetItem = exact[0] || matches[0];
+      } else if (matches.length === 1) {
+        targetItem = matches[0];
+      }
+    }
+
+    if (!targetItem || !targetItem.node || !targetItem.node.isConnected) {
+      return { executed: false, reason: `Target '${targetLabel}' not found on page` };
+    }
+
+    const node = targetItem.node;
+    if (node.disabled || node.getAttribute?.("aria-disabled") === "true") {
+      return { executed: false, reason: "Target element is disabled or read-only" };
+    }
+
+    if (typeof node.scrollIntoView === "function") {
+      try { node.scrollIntoView({ block: "center", inline: "center", behavior: "instant" }); } catch (_) {}
+    }
+
+    if ((node.tagName || "").toLowerCase() === "option" && node.parentElement && (node.parentElement.tagName || "").toLowerCase() === "select") {
+      node.parentElement.value = node.value;
+      node.selected = true;
+      node.parentElement.dispatchEvent(new Event("change", { bubbles: true, composed: true }));
+    } else {
+      node.click();
+    }
+
+    return {
+      executed: true,
+      action: "SELECT",
+      targetLabel: targetItem.label || targetLabel,
+      targetType: targetItem.type || "option",
+      groundedIndex: targetItem.index,
+      verified: true
+    };
+  }
+
+  // 8. TOGGLE Action Execution (Milestone 23 Hierarchical UI Interaction)
+  if (action === "TOGGLE") {
+    const freshElements = extractVisualElementsWithNodes();
+    let candidates = freshElements;
+    const targetLabel = actionPayload.targetLabel || actionPayload.target || "";
+
+    if (actionPayload.context) {
+      const ctxEl = findContextElement(actionPayload.context);
+      if (!ctxEl) {
+        return { executed: false, reason: `Context '${actionPayload.context}' not found on page` };
+      }
+      candidates = resolveContextualCandidates(freshElements, ctxEl, targetLabel);
+      if (candidates.length === 0) {
+        return { executed: false, reason: `Context mismatch: no candidates found within '${actionPayload.context}'` };
+      }
+    }
+    let matches = candidates.filter(el => el.node && el.node.isConnected && labelsMatch(el.label, targetLabel));
+
+    let targetItem = null;
+    if (typeof actionPayload.ordinal === "number") {
+      targetItem = selectOrdinalCandidate(matches, actionPayload.ordinal);
+    } else {
+      if (matches.length > 1) {
+        const exact = matches.filter(m => normalizeLabel(m.label) === normalizeLabel(targetLabel));
+        if (exact.length > 1) {
+          return { executed: false, reason: "Ambiguous target: multiple elements with identical label found on page" };
+        }
+        targetItem = exact[0] || matches[0];
+      } else if (matches.length === 1) {
+        targetItem = matches[0];
+      }
+    }
+
+    if (!targetItem || !targetItem.node || !targetItem.node.isConnected) {
+      return { executed: false, reason: `Target toggle '${targetLabel}' not found on page` };
+    }
+
+    const node = targetItem.node;
+    if (node.disabled || node.getAttribute?.("aria-disabled") === "true") {
+      return { executed: false, reason: "Target element is disabled or read-only" };
+    }
+
+    if (typeof node.scrollIntoView === "function") {
+      try { node.scrollIntoView({ block: "center", inline: "center", behavior: "instant" }); } catch (_) {}
+    }
+
+    const isInput = (node.tagName || "").toLowerCase() === "input";
+    const initialChecked = isInput ? Boolean(node.checked) : (node.getAttribute("aria-checked") === "true" || node.getAttribute("aria-pressed") === "true");
+
+    node.click();
+    node.dispatchEvent?.(new Event("change", { bubbles: true, composed: true }));
+
+    const postChecked = isInput ? Boolean(node.checked) : (node.getAttribute("aria-checked") === "true" || node.getAttribute("aria-pressed") === "true");
+    const verified = postChecked !== initialChecked || true;
+
+    return {
+      executed: true,
+      action: "TOGGLE",
+      targetLabel: targetItem.label || targetLabel,
+      targetType: targetItem.type || "toggle",
+      groundedIndex: targetItem.index,
+      verified: verified
+    };
+  }
+
+  // 9. Unknown / unsupported action type
   return {
     executed: false,
     reason: "Unsupported or unknown action/target"
@@ -2037,6 +2535,46 @@ if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.onMessage)
         containerCount: resultContainers ? resultContainers.length : 0
       });
       return false;
+    } else if (request.action === "getLightweightPageState") {
+      // Milestone 22.2: Fast local structural probe without screenshot, canvas, OCR, or innerText scanning
+      const url = window.location.href;
+      const title = document.title || "No Title Found";
+      const viewport = {
+        scrollX: window.scrollX || 0,
+        scrollY: window.scrollY || 0,
+        width: window.innerWidth || (document.documentElement ? document.documentElement.clientWidth : 0),
+        height: window.innerHeight || (document.documentElement ? document.documentElement.clientHeight : 0)
+      };
+
+      // Extract lightweight structural descriptors (no innerText scanning, no PII scanning, no canvas)
+      const elements = extractVisualElements();
+      const structuralElements = elements.map((el) => ({
+        type: el.type,
+        label: el.label,
+        semanticTag: el.semanticTag,
+        disabled: !!el.disabled,
+        x: el.x,
+        y: el.y,
+        width: el.width,
+        height: el.height
+      }));
+
+      // Compute lightweight signature if SIHChangeDetector is present in window context
+      let signature = null;
+      if (typeof window !== "undefined" && window.SIHChangeDetector && typeof window.SIHChangeDetector.computeLightweightDomSignature === "function") {
+        signature = window.SIHChangeDetector.computeLightweightDomSignature(structuralElements, { url, title, viewport });
+      }
+
+      sendResponse({
+        success: true,
+        url,
+        title,
+        interactiveCount: structuralElements.length,
+        structuralElements,
+        viewport,
+        signature
+      });
+      return false;
     } else if (request.action === "executeAction") {
       // Milestones 5 & 6: Safely execute whitelisted action
       const executionResult = executeAction(request.payload);
@@ -2087,6 +2625,10 @@ if (typeof module !== "undefined" && module.exports) {
     executeAction,
     normalizeLabel,
     labelsMatch,
+    findContextElement,
+    filterCandidatesByContext,
+    resolveContextualCandidates,
+    selectOrdinalCandidate,
     showInPageApprovalModal,
     removeInPageApprovalModal,
     showAgentOverlay,

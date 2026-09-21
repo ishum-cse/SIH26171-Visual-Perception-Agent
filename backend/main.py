@@ -80,7 +80,7 @@ async def serve_demo_page(page_name: str):
 # Milestones 3–6: Text-Only Sanitized Context (Preserved & Backwards-Compatible)
 # =====================================================================
 
-ALLOWED_ACTIONS = {"CLICK", "SCROLL", "FILL", "FILL_FORM", "WARN", "NONE", "SUBMIT"}
+ALLOWED_ACTIONS = {"CLICK", "SCROLL", "FILL", "FILL_FORM", "WARN", "NONE", "SUBMIT", "CHECK", "UNCHECK", "SELECT", "TOGGLE"}
 FORBIDDEN_VALUE_KEYS = {"value", "fieldvalue", "field_value", "localvalue", "local_value"}
 
 def assert_no_forbidden_value_keys(data: Any, path: str = ""):
@@ -124,6 +124,9 @@ class AgentAction(BaseModel):
     fieldHint: Optional[str] = None
     valueKey: Optional[str] = None
     ambiguity: Optional[str] = None
+    context: Optional[str] = None
+    relation: Optional[str] = None
+    ordinal: Optional[int] = None
 
     @field_validator("action")
     @classmethod
@@ -255,10 +258,16 @@ def _match_score(task_lower: str, label: str) -> float:
     if l in SEMANTIC_SYNONYMS and t in SEMANTIC_SYNONYMS[l]:
         return 0.95
 
-    if l in t:
+    if len(l) >= 3 and l in t:
         return max(0.85, len(l) / len(t))
-    if t in l:
+    elif len(l) < 3 and l in t.split():
+        return 0.85
+
+    if len(t) >= 3 and t in l:
         return max(0.80, len(t) / len(l))
+    elif len(t) < 3 and t in l.split():
+        return 0.80
+
     t_tokens = set(t.split())
     l_tokens = set(l.split())
     overlap = len(t_tokens & l_tokens)
@@ -285,7 +294,7 @@ def extract_task_query_or_value(task: str) -> Optional[str]:
         re.IGNORECASE
     )
     if m_as:
-        val = m_as.group(1).strip()
+        val = m_as.group(1).strip().strip('\'"')
         if val and not re.match(r'^(?:the|a|an|box|input|field|button)$', val, re.I):
             return val
 
@@ -295,7 +304,7 @@ def extract_task_query_or_value(task: str) -> Optional[str]:
         re.IGNORECASE
     )
     if m_in:
-        val = m_in.group(1).strip()
+        val = m_in.group(1).strip().strip('\'"')
         if val and not re.match(r'^(?:the|a|an|box|input|field|button)$', val, re.I):
             return val
 
@@ -307,12 +316,12 @@ def extract_task_query_or_value(task: str) -> Optional[str]:
     # "search for machine learning"
     # "search machine learning"
     m_search = re.search(
-    r'(?<!\bfill\s)(?<!\benter\s)(?<!\btype\s)(?<!\bclick\s)(?<!\bfind\s)\bsearch\s+(?:for\s+)?(?!(?:the\s+)?(?:box|input|field|bar|area|button)\b)[\'"]?([^\'",;]+?)[\'"]?(?:\s+(?:and\s+then|and\s+(?:identify|find|open|click|select|locate|choose)|then\s+(?:identify|find|open|click|select|locate|choose))\b|[.,;!?]|$)',
-    task_clean,
-    re.IGNORECASE
-)
+        r'(?<!\bfill\s)(?<!\benter\s)(?<!\btype\s)(?<!\bclick\s)(?<!\bfind\s)\bsearch\s+(?:for\s+)?(?!(?:the\s+)?(?:box|input|field|bar|area|button)\b)[\'"]?([^\'",;]+?)[\'"]?(?:\s+(?:and\s+then|and\s+(?:identify|find|open|click|select|locate|choose)|then\s+(?:identify|find|open|click|select|locate|choose))\b|[.,;!?]|$)',
+        task_clean,
+        re.IGNORECASE
+    )
     if m_search:
-        val = m_search.group(1).strip()
+        val = m_search.group(1).strip().strip('\'"')
         if val and not re.match(r'^(?:the|a|an|it|this|that|box|input|field|bar|area|button)$', val, re.I):
             return val
 

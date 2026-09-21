@@ -191,6 +191,40 @@
       };
     }
 
+    // 4. CHECK / UNCHECK / SELECT / TOGGLE Action (Milestone 23 Hierarchical UI Interaction)
+    if (["CHECK", "UNCHECK", "SELECT", "TOGGLE"].includes(actionType)) {
+      for (const kw of CRITICAL_RISK_KEYWORDS) {
+        if (targetLabel.includes(kw)) {
+          return {
+            risk: RISK_LEVELS.CRITICAL,
+            level: RISK_LEVELS.CRITICAL,
+            requiresApproval: true,
+            reason: `Critical action detected ('${kw}'). Operation requires explicit human approval.`,
+            rationale: `Critical action detected ('${kw}'). Operation requires explicit human approval.`
+          };
+        }
+      }
+      for (const kw of HIGH_RISK_KEYWORDS) {
+        if (targetLabel === kw || targetLabel.includes(kw)) {
+          return {
+            risk: RISK_LEVELS.HIGH,
+            level: RISK_LEVELS.HIGH,
+            requiresApproval: true,
+            reason: `Consequential action detected ('${kw}'). Operation modifies state and requires human approval.`,
+            rationale: `Consequential action detected ('${kw}'). Operation modifies state and requires human approval.`
+          };
+        }
+      }
+      const verbDisplay = actionType.charAt(0) + actionType.slice(1).toLowerCase();
+      return {
+        risk: RISK_LEVELS.LOW,
+        level: RISK_LEVELS.LOW,
+        requiresApproval: false,
+        reason: `${verbDisplay} interaction on '${targetLabel || "control"}'. Autonomous execution permitted.`,
+        rationale: `${verbDisplay} interaction on '${targetLabel || "control"}'. Autonomous execution permitted.`
+      };
+    }
+
     return {
       risk: RISK_LEVELS.LOW,
       level: RISK_LEVELS.LOW,
@@ -299,6 +333,10 @@
           isExplicitTarget: !!rawStep.isExplicitTarget,
           explicitTarget: rawStep.explicitTarget || null,
           isMostRelevant: !!rawStep.isMostRelevant,
+          context: rawStep.context || null,
+          relation: rawStep.relation || null,
+          ordinal: rawStep.ordinal !== undefined ? rawStep.ordinal : null,
+          targetType: rawStep.targetType || null,
           risk: riskAssessment.risk || riskAssessment.level,
           level: riskAssessment.level,
           requiresApproval: riskAssessment.requiresApproval,
@@ -350,6 +388,39 @@
           postconditions: ["scroll_position_verified"]
         });
         reasoningTrace.push(`Step ${idx + 1} planned: SCROLL [${riskAssessment.level} Risk - Autonomous]`);
+      } else if (["CHECK", "UNCHECK", "SELECT", "TOGGLE"].includes(stepType)) {
+        clickCount++;
+        const targetLabel = rawStep.targetHint || rawStep.target || "control";
+        riskAssessment = classifyActionRisk({
+          action: stepType,
+          targetLabel: targetLabel,
+          targetType: rawStep.targetType
+        });
+        if (riskAssessment.requiresApproval) {
+          hasHighRiskStep = true;
+        }
+        steps.push({
+          id: idx + 1,
+          stepId: idx,
+          goalId: rawStep.goalId || null,
+          type: stepType,
+          action: stepType,
+          target: targetLabel,
+          targetHint: targetLabel,
+          context: rawStep.context || null,
+          relation: rawStep.relation || null,
+          ordinal: rawStep.ordinal !== undefined ? rawStep.ordinal : null,
+          targetType: rawStep.targetType || null,
+          risk: riskAssessment.risk || riskAssessment.level,
+          level: riskAssessment.level,
+          requiresApproval: riskAssessment.requiresApproval,
+          approvalPrompt: `Execute action: ${stepType} → ${targetLabel}`,
+          reasoning: riskAssessment.rationale,
+          preconditions: ["target_grounded", "target_visible", "target_not_disabled"],
+          postconditions: ["target_state_verified"]
+        });
+        const riskLabel = riskAssessment.requiresApproval ? "HIGH Risk - Approval Required" : `${riskAssessment.level} Risk - Autonomous`;
+        reasoningTrace.push(`Step ${idx + 1} planned: ${stepType} '${targetLabel}' [${riskLabel}]`);
       }
     });
 
@@ -493,7 +564,10 @@
     }
 
     const actionType = (agentAction.action || "").toUpperCase();
-    const ALLOWED_ACTIONS = new Set(["CLICK", "SCROLL", "FILL", "FILL_FORM", "SUBMIT", "NONE"]);
+    const ALLOWED_ACTIONS = new Set([
+      "CLICK", "SCROLL", "FILL", "FILL_FORM", "SUBMIT", "NONE",
+      "CHECK", "UNCHECK", "SELECT", "TOGGLE"
+    ]);
     if (!ALLOWED_ACTIONS.has(actionType)) {
       return {
         allowed: false,

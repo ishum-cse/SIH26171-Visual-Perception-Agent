@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>M21.3 Controlled Recovery Demo — SIH26171</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+      margin: 40px auto;
+      max-width: 680px;
+      padding: 0 20px;
+      color: #1e293b;
+      background: #f8fafc;
+    }
+    .card {
+      background: #ffffff;
+      border: 1px solid #e2e8f0;
+      border-radius: 12px;
+      padding: 24px;
+      box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05);
+      margin-bottom: 20px;
+    }
+    h2 {
+      margin-top: 0;
+      color: #0f172a;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .badge {
+      display: inline-block;
+      font-size: 11px;
+      font-weight: 700;
+      padding: 3px 8px;
+      border-radius: 4px;
+      background: #e0f2fe;
+      color: #0369a1;
+    }
+    .badge-success {
+      background: #dcfce7;
+      color: #15803d;
+    }
+    .badge-warn {
+      background: #fef3c7;
+      color: #b45309;
+    }
+    .explanation {
+      font-size: 13.5px;
+      color: #475569;
+      line-height: 1.5;
+      margin-bottom: 18px;
+    }
+    .step-box {
+      background: #f1f5f9;
+      border-left: 4px solid #3b82f6;
+      padding: 12px 16px;
+      border-radius: 0 8px 8px 0;
+      font-size: 13px;
+      margin-bottom: 20px;
+    }
+    .interactive-zone {
+      border: 2px dashed #cbd5e1;
+      border-radius: 8px;
+      padding: 20px;
+      text-align: center;
+      background: #fafafa;
+      min-height: 120px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+    }
+    button.action-btn {
+      background: #2563eb;
+      color: #ffffff;
+      border: none;
+      padding: 10px 22px;
+      font-size: 14px;
+      font-weight: 600;
+      border-radius: 6px;
+      cursor: pointer;
+      transition: all 0.15s ease;
+    }
+    button.action-btn:hover {
+      background: #1d4ed8;
+    }
+    button.action-btn:disabled {
+      background: #94a3b8;
+      cursor: not-allowed;
+    }
+    button.shift-btn {
+      background: #64748b;
+      color: #ffffff;
+      border: none;
+      padding: 8px 14px;
+      font-size: 12px;
+      font-weight: 600;
+      border-radius: 6px;
+      cursor: pointer;
+      margin-top: 8px;
+    }
+    button.shift-btn:hover {
+      background: #475569;
+    }
+    .status-panel {
+      margin-top: 15px;
+      padding: 12px;
+      border-radius: 6px;
+      background: #f8fafc;
+      border: 1px solid #e2e8f0;
+      font-size: 12.5px;
+      font-family: monospace;
+      color: #334155;
+    }
+    .log-list {
+      list-style-type: none;
+      padding-left: 0;
+      margin: 6px 0 0 0;
+      max-height: 120px;
+      overflow-y: auto;
+    }
+    .log-list li {
+      padding: 2px 0;
+      border-bottom: 1px dotted #e2e8f0;
+    }
+  </style>
+</head>
+<body>
+
+  <div class="card">
+    <h2>
+      <span>M21.3 Controlled Recovery Test Page</span>
+      <span class="badge">Milestone 21.3</span>
+    </h2>
+
+    <p class="explanation">
+      This page tests <strong>Controlled Recovery after Action Failure</strong> in a completely safe, deterministic environment.
+      It demonstrates the exact recovery sequence:
+      <code>Failure &rarr; Fresh Perception &rarr; Re-ground Target &rarr; Safety Gate &rarr; One Recovery Action &rarr; Verification</code>.
+    </p>
+
+    <div class="step-box">
+      <strong>Test Flow:</strong><br>
+      1. Click <em>"Simulate Stale Target Drift"</em> to move the button into a new container with fresh coordinates and dynamic ID.<br>
+      2. Instruct the browser agent: <code>click the confirm registration button</code>.<br>
+      3. The agent detects any stale DOM target, triggers fresh perception on the live page, validates and re-grounds to the fresh target, checks the Safety Gate, executes the single recovery action, and reports <strong>VERIFIED</strong>.
+    </div>
+
+    <div class="interactive-zone" id="interactiveZone">
+      <div id="targetContainer">
+        <button id="confirmRegBtn" class="action-btn" role="button">
+          Confirm Registration
+        </button>
+      </div>
+      <div>
+        <button id="simulateShiftBtn" class="shift-btn" type="button">
+          Simulate Stale Target Drift (Move Element)
+        </button>
+      </div>
+    </div>
+
+    <div class="status-panel">
+      <div><strong>Page Event Telemetry:</strong> <span id="eventStatus" style="color: #166534; font-weight: bold;">Ready</span></div>
+      <ul class="log-list" id="eventLogs">
+        <li>[SYSTEM] Test page initialized. Target element loaded.</li>
+      </ul>
+    </div>
+  </div>
+
+  <script>
+    (function () {
+      const confirmBtn = document.getElementById("confirmRegBtn");
+      const shiftBtn = document.getElementById("simulateShiftBtn");
+      const targetContainer = document.getElementById("targetContainer");
+      const eventStatus = document.getElementById("eventStatus");
+      const eventLogs = document.getElementById("eventLogs");
+
+      let clickCount = 0;
+      let shifted = false;
+
+      function logEvent(msg) {
+        const li = document.createElement("li");
+        li.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+        eventLogs.appendChild(li);
+        eventLogs.scrollTop = eventLogs.scrollHeight;
+      }
+
+      function attachConfirmHandler(btn) {
+        btn.addEventListener("click", () => {
+          clickCount++;
+          eventStatus.textContent = `Action Executed & Verified (Total clicks: ${clickCount})`;
+          eventStatus.style.color = "#166534";
+          logEvent(`'Confirm Registration' button clicked successfully! (Count: ${clickCount})`);
+        });
+      }
+
+      attachConfirmHandler(confirmBtn);
+
+      shiftBtn.addEventListener("click", () => {
+        shifted = !shifted;
+        targetContainer.innerHTML = "";
+
+        if (shifted) {
+          // Displace element to simulate dynamic layout mutation / AJAX refresh
+          const newWrapper = document.createElement("div");
+          newWrapper.style.padding = "14px";
+          newWrapper.style.background = "#eef2ff";
+          newWrapper.style.border = "1px solid #c7d2fe";
+          newWrapper.style.borderRadius = "8px";
+          newWrapper.id = "dynamicRelocatedSection";
+
+          const newBtn = document.createElement("button");
+          newBtn.id = "confirmRegBtnDynamic";
+          newBtn.className = "action-btn";
+          newBtn.setAttribute("role", "button");
+          newBtn.textContent = "Confirm Registration";
+          attachConfirmHandler(newBtn);
+
+          newWrapper.appendChild(newBtn);
+          targetContainer.appendChild(newWrapper);
+
+          eventStatus.textContent = "Target relocated to #dynamicRelocatedSection (Stale index invalidated)";
+          eventStatus.style.color = "#b45309";
+          logEvent("DOM mutated: Target element relocated to new container with dynamic ID");
+          shiftBtn.textContent = "Reset to Original Position";
+        } else {
+          const origBtn = document.createElement("button");
+          origBtn.id = "confirmRegBtn";
+          origBtn.className = "action-btn";
+          origBtn.setAttribute("role", "button");
+          origBtn.textContent = "Confirm Registration";
+          attachConfirmHandler(origBtn);
+
+          targetContainer.appendChild(origBtn);
+          eventStatus.textContent = "Target reset to original location";
+          eventStatus.style.color = "#166534";
+          logEvent("DOM reset: Target returned to default position");
+          shiftBtn.textContent = "Simulate Stale Target Drift (Move Element)";
+        }
+      });
+    })();
+  </script>
+</body>
+</html>

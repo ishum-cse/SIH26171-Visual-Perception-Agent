@@ -249,14 +249,239 @@ function compareScreenSignatures(prev, current, pixelThreshold = PIXEL_CHANGE_TH
   };
 }
 
+/**
+ * Normalizes URL for stable comparisons.
+ * @param {string} url
+ * @returns {string}
+ */
+function normalizeUrl(url) {
+  if (!url || typeof url !== "string") return "";
+  try {
+    const parsed = new URL(url);
+    return (parsed.origin + parsed.pathname + parsed.search).toLowerCase();
+  } catch (_) {
+    return url.trim().toLowerCase();
+  }
+}
+
+/**
+ * Normalizes title for stable comparisons.
+ * @param {string} title
+ * @returns {string}
+ */
+function normalizeTitle(title) {
+  if (!title || typeof title !== "string") return "";
+  return title.trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+/**
+ * Milestone 22.2: Generates a fast, lightweight structural page signature from DOM
+ * elements and page metadata without screenshot capture, canvas rendering, OCR, or reading form values.
+ *
+ * Privacy Guarantees:
+ * - NEVER reads or includes element.value, input contents, passwords, or raw form data.
+ * - Only structural metadata (type, label, semanticTag, disabled state, coarse bounds) is hashed.
+ *
+ * @param {Array<Object>} elements - List of visible interactive element descriptors
+ * @param {Object} metadata - { url, title, viewport: { scrollX, scrollY, width, height } }
+ * @returns {Object} Lightweight signature object
+ */
+function computeLightweightDomSignature(elements = [], metadata = {}) {
+  const normUrl = normalizeUrl(metadata.url || "");
+  const normTitle = normalizeTitle(metadata.title || "");
+  const vp = metadata.viewport || {};
+  const elList = Array.isArray(elements) ? elements : [];
+
+  // 1. Structural hash: sorted summary of element type, label, semantic tag, and disabled state
+  // STRICT PRIVACY: NEVER inspects or includes el.value, el.inputValue, password, or textarea content
+  const sortedStructure = elList
+    .map((el) => {
+      const type = el.type || "";
+      const label = el.label || "";
+      const tag = el.semanticTag || "";
+      const disabled = el.disabled ? "1" : "0";
+      return `${type}:${label}:${tag}:${disabled}`;
+    })
+    .sort()
+    .join("|");
+  const domHash = hashString(sortedStructure);
+
+  // 2. Coarse bounding box hash: element coordinates rounded to 10px buckets
+  // Detects layout shifts, dynamic insertions, or reflows while being immune to sub-pixel noise
+  const sortedBboxes = elList
+    .map((el) => {
+      const type = el.type || "";
+      const cx = Math.round((el.x || 0) / 10) * 10;
+      const cy = Math.round((el.y || 0) / 10) * 10;
+      const cw = Math.round((el.width || 0) / 10) * 10;
+      const ch = Math.round((el.height || 0) / 10) * 10;
+      return `${type}:${cx}:${cy}:${cw}:${ch}`;
+    })
+    .sort()
+    .join("|");
+  const bboxHash = hashString(sortedBboxes);
+
+  return {
+    url: normUrl,
+    title: normTitle,
+    elementCount: elList.length,
+    domHash,
+    bboxHash,
+    scrollX: Math.round(vp.scrollX || 0),
+    scrollY: Math.round(vp.scrollY || 0),
+    viewportWidth: Math.round(vp.width || 0),
+    viewportHeight: Math.round(vp.height || 0),
+    timestamp: Date.now()
+  };
+}
+
+/**
+ * Milestone 22.2: Compares two lightweight DOM signatures to determine if a page state change occurred.
+ *
+ * @param {Object|null} prev - Previous lightweight signature
+ * @param {Object|null} current - Current lightweight signature
+ * @returns {Object} { changed: boolean, reason: string }
+ */
+function compareLightweightSignatures(prev, current) {
+  if (!prev || !current) {
+    return { changed: true, reason: "Initial or missing page signature" };
+  }
+  if (prev.url !== current.url) {
+    return { changed: true, reason: `URL changed (${prev.url} -> ${current.url})` };
+  }
+  if (prev.title !== current.title) {
+    return { changed: true, reason: `Title changed (${prev.title} -> ${current.title})` };
+  }
+  if (prev.elementCount !== current.elementCount) {
+    return { changed: true, reason: `Interactive element count changed (${prev.elementCount} -> ${current.elementCount})` };
+  }
+  if (prev.domHash !== current.domHash) {
+    return { changed: true, reason: "Structural DOM signature or labels changed" };
+  }
+  if (prev.bboxHash !== current.bboxHash) {
+    return { changed: true, reason: "Element layout or positions shifted" };
+  }
+  if (Math.abs((prev.scrollX || 0) - (current.scrollX || 0)) > 10 || Math.abs((prev.scrollY || 0) - (current.scrollY || 0)) > 10) {
+    return { changed: true, reason: "Viewport scroll position changed" };
+  }
+  return { changed: false, reason: "Page structure, elements, and layout identical" };
+}
+
+const PERCEPTION_CACHE_TTL_MS = 10000;
+
+/**
+ * Milestone 22.2: Evaluates whether the cached on-device visual perception state
+ * can safely be reused for the current step without running expensive screenshot,
+ * OCR, SqueezeNet, and spatial fusion passes.
+ *
+ * @param {Object} params
+ * @param {string} [params.lastAction] - Type of previous action executed ("FILL", "CLICK", "SUBMIT", "SCROLL", etc.)
+ * @param {string} [params.nextActionType] - Type of next planned action if known
+ * @param {Object|null} [params.previousSignature] - Cached lightweight DOM signature from prior step
+ * @param {Object|null} [params.currentSignature] - Freshly probed lightweight DOM signature
+ * @param {number} [params.currentStep] - 1-based index of current agent loop step
+ * @param {Object|null} [params.verificationResult] - Verification outcome of previous action
+ * @param {number} [params.cachedAt] - Timestamp when current perception cache was generated
+ * @param {boolean} [params.forceFresh] - Explicit override forcing fresh perception
+ * @param {boolean} [params.hasCachedData] - Whether perception variables (fused elements, DOM elements) exist
+ * @returns {{ canReuse: boolean, reason: string }}
+ */
+function canReusePerception({
+  lastAction = null,
+  nextActionType = null,
+  previousSignature = null,
+  currentSignature = null,
+  currentStep = 1,
+  verificationResult = null,
+  cachedAt = 0,
+  forceFresh = false,
+  hasCachedData = false
+} = {}) {
+  // 1. Initial Step (Step 1) must always execute full baseline perception
+  if (currentStep <= 1) {
+    return { canReuse: false, reason: "FRESH — Initial observation (Step 1)" };
+  }
+
+  // 2. Explicit force fresh (e.g. controlled recovery or caller directive)
+  if (forceFresh) {
+    return { canReuse: false, reason: "FRESH — Forced by recovery or directive" };
+  }
+
+  // 3. Cached data availability check
+  if (!hasCachedData) {
+    return { canReuse: false, reason: "FRESH — No cached perception available" };
+  }
+
+  // 4. Cache TTL expiration check (PERCEPTION_CACHE_TTL_MS = 10000ms)
+  const ageMs = Date.now() - (cachedAt || 0);
+  if (ageMs > PERCEPTION_CACHE_TTL_MS) {
+    return { canReuse: false, reason: `FRESH — Perception cache expired (${Math.round(ageMs / 1000)}s > ${PERCEPTION_CACHE_TTL_MS / 1000}s TTL)` };
+  }
+
+  // 5. Actions that MUST force fresh perception:
+  const normLast = (lastAction || "").toUpperCase();
+  if (normLast === "CLICK") {
+    return { canReuse: false, reason: "FRESH — Forced by CLICK (possible UI navigation/modal)" };
+  }
+  if (normLast === "SUBMIT") {
+    return { canReuse: false, reason: "FRESH — Forced by SUBMIT (form submission/transition)" };
+  }
+  if (normLast === "SCROLL") {
+    return { canReuse: false, reason: "FRESH — Forced by SCROLL (viewport coordinates shifted)" };
+  }
+  // M23: State-changing contextual actions force fresh perception
+  if (["CHECK", "UNCHECK", "SELECT", "TOGGLE"].includes(normLast)) {
+    return { canReuse: false, reason: `FRESH — Forced by ${normLast} (state-changing contextual action)` };
+  }
+
+  // 6. If next planned action is explicitly SCROLL or SUBMIT:
+  const normNext = (nextActionType || "").toUpperCase();
+  if (normNext === "SCROLL") {
+    return { canReuse: false, reason: "FRESH — Forced by upcoming SCROLL" };
+  }
+  if (normNext === "SUBMIT") {
+    return { canReuse: false, reason: "FRESH — Forced by upcoming SUBMIT" };
+  }
+
+  // 7. Verification outcome of previous action:
+  if (verificationResult) {
+    if (verificationResult.status === "FAILED") {
+      return { canReuse: false, reason: "FRESH — Prior action verification FAILED" };
+    }
+    if (verificationResult.status === "UNKNOWN") {
+      return { canReuse: false, reason: "FRESH — Verification Uncertain (Prior action status UNKNOWN)" };
+    }
+  }
+
+  // 8. Signatures presence
+  if (!previousSignature || !currentSignature) {
+    return { canReuse: false, reason: "FRESH — Missing page state signature" };
+  }
+
+  // 9. Compare signatures using compareLightweightSignatures
+  const comp = compareLightweightSignatures(previousSignature, currentSignature);
+  if (comp.changed) {
+    return { canReuse: false, reason: `FRESH — Page Changed (${comp.reason})` };
+  }
+
+  // 10. All checks passed: safe for adaptive perception reuse
+  return { canReuse: true, reason: "REUSED — Stable Page" };
+}
+
 if (typeof window !== "undefined") {
   window.SIHChangeDetector = {
     computeScreenSignature,
     compareScreenSignatures,
+    computeLightweightDomSignature,
+    compareLightweightSignatures,
+    canReusePerception,
     computeHammingDistance,
     hashString,
+    normalizeUrl,
+    normalizeTitle,
     PIXEL_CHANGE_THRESHOLD,
-    CHANGE_LEVELS
+    CHANGE_LEVELS,
+    PERCEPTION_CACHE_TTL_MS
   };
 }
 
@@ -264,9 +489,15 @@ if (typeof module !== "undefined" && module.exports) {
   module.exports = {
     computeScreenSignature,
     compareScreenSignatures,
+    computeLightweightDomSignature,
+    compareLightweightSignatures,
+    canReusePerception,
     computeHammingDistance,
     hashString,
+    normalizeUrl,
+    normalizeTitle,
     PIXEL_CHANGE_THRESHOLD,
-    CHANGE_LEVELS
+    CHANGE_LEVELS,
+    PERCEPTION_CACHE_TTL_MS
   };
 }

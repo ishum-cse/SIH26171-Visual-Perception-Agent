@@ -258,6 +258,82 @@
         break;
       }
 
+      case "CHECK": {
+        if (executionResult && (executionResult.verified === true || executionResult.controlUpdated === true)) {
+          status = VERIFICATION_STATUS.VERIFIED;
+          reason = "Checkbox verified: Control checked successfully";
+          evidence.controlUpdated = true;
+        } else if (executionResult && (executionResult.verified === false || executionResult.controlUpdated === false)) {
+          status = VERIFICATION_STATUS.FAILED;
+          reason = "Checkbox verification failed: Control did not check";
+          evidence.controlUpdated = false;
+        } else if (domChanged || visualStateChanged || targetStateChanged) {
+          status = VERIFICATION_STATUS.VERIFIED;
+          reason = "Checkbox verified: Control state or DOM updated";
+        } else {
+          status = VERIFICATION_STATUS.UNKNOWN;
+          reason = "Checkbox verification unknown: DOM state unchanged";
+        }
+        break;
+      }
+
+      case "UNCHECK": {
+        if (executionResult && (executionResult.verified === true || executionResult.controlUpdated === true)) {
+          status = VERIFICATION_STATUS.VERIFIED;
+          reason = "Checkbox verified: Control unchecked successfully";
+          evidence.controlUpdated = true;
+        } else if (executionResult && (executionResult.verified === false || executionResult.controlUpdated === false)) {
+          status = VERIFICATION_STATUS.FAILED;
+          reason = "Checkbox verification failed: Control did not uncheck";
+          evidence.controlUpdated = false;
+        } else if (domChanged || visualStateChanged || targetStateChanged) {
+          status = VERIFICATION_STATUS.VERIFIED;
+          reason = "Checkbox verified: Control state or DOM updated";
+        } else {
+          status = VERIFICATION_STATUS.UNKNOWN;
+          reason = "Checkbox verification unknown: DOM state unchanged";
+        }
+        break;
+      }
+
+      case "SELECT": {
+        if (executionResult && (executionResult.verified === true || executionResult.controlUpdated === true)) {
+          status = VERIFICATION_STATUS.VERIFIED;
+          reason = "Selection verified: Option or control selected";
+          evidence.controlUpdated = true;
+        } else if (executionResult && (executionResult.verified === false || executionResult.controlUpdated === false)) {
+          status = VERIFICATION_STATUS.FAILED;
+          reason = "Selection verification failed: Option was not selected";
+          evidence.controlUpdated = false;
+        } else if (urlChanged || titleChanged || domChanged || visualStateChanged || targetStateChanged) {
+          status = VERIFICATION_STATUS.VERIFIED;
+          reason = "Selection verified: State or DOM updated";
+        } else {
+          status = VERIFICATION_STATUS.UNKNOWN;
+          reason = "Selection verification unknown: DOM state unchanged";
+        }
+        break;
+      }
+
+      case "TOGGLE": {
+        if (executionResult && (executionResult.verified === true || executionResult.controlUpdated === true)) {
+          status = VERIFICATION_STATUS.VERIFIED;
+          reason = "Toggle verified: Control toggled successfully";
+          evidence.controlUpdated = true;
+        } else if (executionResult && (executionResult.verified === false || executionResult.controlUpdated === false)) {
+          status = VERIFICATION_STATUS.FAILED;
+          reason = "Toggle verification failed: Control state did not toggle";
+          evidence.controlUpdated = false;
+        } else if (domChanged || visualStateChanged || targetStateChanged) {
+          status = VERIFICATION_STATUS.VERIFIED;
+          reason = "Toggle verified: Control state or visual appearance updated";
+        } else {
+          status = VERIFICATION_STATUS.UNKNOWN;
+          reason = "Toggle verification unknown: DOM state unchanged";
+        }
+        break;
+      }
+
       case "NONE":
       default: {
         status = VERIFICATION_STATUS.VERIFIED;
@@ -285,6 +361,74 @@
     return verificationResult;
   }
 
+  /**
+   * M21.3: Validates a candidate target element for controlled recovery.
+   * Recovery is allowed only if:
+   * - Target element is present
+   * - Target is enabled/usable (not disabled, not read-only, aria-disabled !== "true")
+   * - Grounding confidence is acceptable (>= 0.40)
+   * - Target is unambiguous (no duplicate identical candidates without distinction)
+   * 
+   * @param {Object} targetElement - Re-grounded target element from fresh perception
+   * @param {Array<Object>} allCandidates - All fresh visual/DOM candidates
+   * @param {Object} actionPayload - Proposed action payload
+   * @returns {{ valid: boolean, reason: string }}
+   */
+  function validateRecoveryTarget(targetElement, allCandidates = [], actionPayload = {}) {
+    if (!targetElement || typeof targetElement !== "object") {
+      return { valid: false, reason: "Target not found on current page" };
+    }
+
+    // Usability check: reject disabled or read-only elements
+    if (targetElement.disabled || String(targetElement["aria-disabled"]).toLowerCase() === "true" || targetElement.readOnly) {
+      return { valid: false, reason: "Target element is disabled or read-only" };
+    }
+
+    // Confidence check
+    const score = targetElement.groundingScore !== undefined
+      ? targetElement.groundingScore
+      : (actionPayload.groundingScore !== undefined ? actionPayload.groundingScore : 1.0);
+    if (typeof score === "number" && score < 0.40) {
+      return { valid: false, reason: `Target grounding confidence too low (${score.toFixed(2)})` };
+    }
+
+    // Ambiguity check: if multiple candidates share the exact same normalized label and type
+    const targetLabel = (targetElement.label || actionPayload.targetLabel || actionPayload.target || "").trim().toLowerCase();
+    const targetType = (targetElement.type || actionPayload.targetType || "").trim().toLowerCase();
+
+    if (targetLabel && Array.isArray(allCandidates) && allCandidates.length > 1) {
+      const exactMatches = allCandidates.filter((c) => {
+        if (!c || c === targetElement) return false;
+        const cLabel = (c.label || "").trim().toLowerCase();
+        const cType = (c.type || "").trim().toLowerCase();
+        return cLabel === targetLabel && (!targetType || !cType || cType === targetType);
+      });
+
+      if (exactMatches.length > 0) {
+        return { valid: false, reason: "Target ambiguous: multiple identical elements found on page" };
+      }
+    }
+
+    return { valid: true, reason: "Target validated" };
+  }
+
+  /**
+   * M21.3: Builds a structured recovery result contract conforming to M21 specification.
+   * 
+   * @param {Object} params
+   * @returns {Object}
+   */
+  function createRecoveryResult({ attempted = true, allowed = false, result = "FAILED", reason = "", recoveryAction = null, safetyChecked = true } = {}) {
+    return {
+      attempted: Boolean(attempted),
+      allowed: Boolean(allowed),
+      result: String(result).toUpperCase(),
+      reason: sanitizeFailureReason(reason || ""),
+      recoveryAction: recoveryAction || null,
+      safetyChecked: Boolean(safetyChecked)
+    };
+  }
+
   // Export to window for Chrome Extension
   if (typeof window !== "undefined") {
     window.SIHActionVerifier = {
@@ -292,7 +436,9 @@
       verifyActionOutcome,
       sanitizeFailureReason,
       normalizeUrl,
-      normalizeTitle
+      normalizeTitle,
+      validateRecoveryTarget,
+      createRecoveryResult
     };
   }
 
@@ -303,7 +449,10 @@
       verifyActionOutcome,
       sanitizeFailureReason,
       normalizeUrl,
-      normalizeTitle
+      normalizeTitle,
+      validateRecoveryTarget,
+      createRecoveryResult
     };
   }
 })();
+

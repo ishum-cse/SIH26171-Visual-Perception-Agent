@@ -229,7 +229,9 @@ document.addEventListener("DOMContentLoaded", () => {
       cardActionType.textContent = act;
       cardActionType.className = `action-badge ${act === "FILL" ? "badge-action-fill" :
           act === "CLICK" ? "badge-action-click" :
-            act === "SUBMIT" ? "badge-action-submit" : "badge-action-none"
+            act === "SUBMIT" ? "badge-action-submit" :
+              act === "SELECT" ? "badge-action-select" :
+                (["CHECK", "UNCHECK", "TOGGLE"].includes(act) ? "badge-action-check" : "badge-action-none")
         }`;
     }
     if (cardActionTarget) cardActionTarget.textContent = data.target || "(None)";
@@ -432,10 +434,25 @@ document.addEventListener("DOMContentLoaded", () => {
   let redactionCompleted = false;
   let redactionError = null;
 
+  // Milestone 22.2: Adaptive Local Perception Cache & Timing
+  const PERCEPTION_CACHE_TTL_MS = 10000;
+  let cachedLightweightSignature = null;
+  let cachedPerceptionTimestamp = 0;
+  let lastExecutedActionType = null;
+  let lastStepVerification = null;
+  let lastPerceptionDecision = { reused: false, reason: "FRESH — Initial observation (Step 1)", probeMs: 0 };
+  let perceptionTelemetryStats = {
+    fullPerceptionPasses: 0,
+    reusedPerceptionPasses: 0,
+    totalProbeMs: 0
+  };
+
   // Listeners waiting for privacy redaction pass to conclude
   let onRedactionCompleteCallbacks = [];
 
   const timing = {
+    pageProbeMs: null,
+    adaptivePerceptionSavedMs: 0,
     domExtractionMs: null,
     screenshotMs: null,
     visionInferenceMs: null,
@@ -469,6 +486,16 @@ document.addEventListener("DOMContentLoaded", () => {
     }
     return new Promise((resolve) => {
       onRedactionCompleteCallbacks.push(resolve);
+      // Safety timeout: Ensure local perception never hangs indefinitely if OCR/redaction is delayed
+      setTimeout(() => {
+        if (!redactionCompleted) {
+          resolve({
+            success: !!latestSanitizedDataUrl,
+            sanitizedScreenshotDataUrl: latestSanitizedDataUrl,
+            error: "Redaction timeout fallback"
+          });
+        }
+      }, 5000);
     });
   };
 
@@ -1068,6 +1095,126 @@ document.addEventListener("DOMContentLoaded", () => {
     });
   };
 
+  /**
+   * Milestone 22.2: Evaluates whether the cached on-device visual perception state
+   * can safely be reused for the current step without running expensive screenshot,
+   * OCR, SqueezeNet, and spatial fusion passes.
+   *
+   * @param {Object} params
+   * @param {string} [params.lastAction] - Type of previous action executed ("FILL", "CLICK", "SUBMIT", "SCROLL", etc.)
+   * @param {string} [params.nextActionType] - Type of next planned action if known
+   * @param {Object|null} [params.previousSignature] - Cached lightweight DOM signature from prior step
+   * @param {Object|null} [params.currentSignature] - Freshly probed lightweight DOM signature
+   * @param {number} [params.currentStep] - 1-based index of current agent loop step
+   * @param {Object|null} [params.verificationResult] - Verification outcome of previous action
+   * @param {number} [params.cachedAt] - Timestamp when current perception cache was generated
+   * @param {boolean} [params.forceFresh] - Explicit override forcing fresh perception
+   * @param {boolean} [params.hasCachedData] - Whether perception variables (fused elements, DOM elements) exist
+   * @returns {{ canReuse: boolean, reason: string }}
+   */
+  const canReusePerception = ({
+    lastAction = null,
+    nextActionType = null,
+    previousSignature = null,
+    currentSignature = null,
+    currentStep = 1,
+    verificationResult = null,
+    cachedAt = 0,
+    forceFresh = false,
+    hasCachedData = false
+  } = {}) => {
+    // 1. Initial Step (Step 1) must always execute full baseline perception
+    if (currentStep <= 1) {
+      return { canReuse: false, reason: "FRESH — Initial observation (Step 1)" };
+    }
+
+    // 2. Explicit force fresh (e.g. controlled recovery or caller directive)
+    if (forceFresh) {
+      return { canReuse: false, reason: "FRESH — Forced by recovery or directive" };
+    }
+
+    // 3. Cached data availability check
+    if (!hasCachedData) {
+      return { canReuse: false, reason: "FRESH — No cached perception available" };
+    }
+
+    // 4. Cache TTL expiration check (PERCEPTION_CACHE_TTL_MS = 10000ms)
+    const ageMs = Date.now() - (cachedAt || 0);
+    if (ageMs > PERCEPTION_CACHE_TTL_MS) {
+      return { canReuse: false, reason: `FRESH — Perception cache expired (${Math.round(ageMs / 1000)}s > ${PERCEPTION_CACHE_TTL_MS / 1000}s TTL)` };
+    }
+
+    // 5. Actions that MUST force fresh perception:
+    const normLast = (lastAction || "").toUpperCase();
+    if (normLast === "CLICK") {
+      return { canReuse: false, reason: "FRESH — Forced by CLICK (possible UI navigation/modal)" };
+    }
+    if (normLast === "SUBMIT") {
+      return { canReuse: false, reason: "FRESH — Forced by SUBMIT (form submission/transition)" };
+    }
+    if (normLast === "SCROLL") {
+      return { canReuse: false, reason: "FRESH — Forced by SCROLL (viewport coordinates shifted)" };
+    }
+
+    // 6. If next planned action is explicitly SCROLL or SUBMIT:
+    const normNext = (nextActionType || "").toUpperCase();
+    if (normNext === "SCROLL") {
+      return { canReuse: false, reason: "FRESH — Forced by upcoming SCROLL" };
+    }
+    if (normNext === "SUBMIT") {
+      return { canReuse: false, reason: "FRESH — Forced by upcoming SUBMIT" };
+    }
+
+    // 7. Verification outcome of previous action:
+    if (verificationResult) {
+      if (verificationResult.status === "FAILED") {
+        return { canReuse: false, reason: "FRESH — Prior action verification FAILED" };
+      }
+      if (verificationResult.status === "UNKNOWN") {
+        return { canReuse: false, reason: "FRESH — Verification Uncertain (Prior action status UNKNOWN)" };
+      }
+    }
+
+    // 8. Signatures presence
+    if (!previousSignature || !currentSignature) {
+      return { canReuse: false, reason: "FRESH — Missing page state signature" };
+    }
+
+    // 9. Compare signatures using SIHChangeDetector if available, else structural compare
+    if (typeof window !== "undefined" && window.SIHChangeDetector && typeof window.SIHChangeDetector.compareLightweightSignatures === "function") {
+      const comp = window.SIHChangeDetector.compareLightweightSignatures(previousSignature, currentSignature);
+      if (comp.changed) {
+        return { canReuse: false, reason: `FRESH — Page Changed (${comp.reason})` };
+      }
+    } else {
+      if (previousSignature.url !== currentSignature.url) {
+        return { canReuse: false, reason: "FRESH — Page Changed (URL changed)" };
+      }
+      if (previousSignature.title !== currentSignature.title) {
+        return { canReuse: false, reason: "FRESH — Page Changed (Title changed)" };
+      }
+      if (previousSignature.elementCount !== currentSignature.elementCount) {
+        return { canReuse: false, reason: `FRESH — Page Changed (Element count ${previousSignature.elementCount} -> ${currentSignature.elementCount})` };
+      }
+      if (previousSignature.domHash !== currentSignature.domHash) {
+        return { canReuse: false, reason: "FRESH — Page Changed (Structural DOM signature changed)" };
+      }
+      if (previousSignature.bboxHash !== currentSignature.bboxHash) {
+        return { canReuse: false, reason: "FRESH — Page Changed (Layout or positions shifted)" };
+      }
+    }
+
+    // 10. All checks passed: safe for adaptive perception reuse
+    return { canReuse: true, reason: "REUSED — Stable Page" };
+  };
+
+  if (typeof window !== "undefined") {
+    window.SIHAdaptivePerception = {
+      canReusePerception,
+      PERCEPTION_CACHE_TTL_MS
+    };
+  }
+
   // Resets pipeline state for a fresh capture/agent pass
   const resetPipelineState = () => {
     latestScreenshotDataUrl = null;
@@ -1160,24 +1307,31 @@ document.addEventListener("DOMContentLoaded", () => {
     formData.append("privacyMetadata", JSON.stringify(privacyMetadata));
     formData.append("requestId", requestId);
 
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 8000);
     const tStart = performance.now();
-    const res = await fetch("http://localhost:8000/api/visual-context", {
-      method: "POST",
-      body: formData
-    });
-    const tElapsed = Math.round(performance.now() - tStart);
+    try {
+      const res = await fetch("http://127.0.0.1:8000/api/visual-context", {
+        method: "POST",
+        body: formData,
+        signal: controller.signal
+      });
+      const tElapsed = Math.round(performance.now() - tStart);
 
-    if (!res.ok) {
-      const errText = await res.text();
-      throw new Error(`Gateway Error HTTP ${res.status}: ${errText}`);
+      if (!res.ok) {
+        const errText = await res.text();
+        throw new Error(`Gateway Error HTTP ${res.status}: ${errText}`);
+      }
+
+      const resJson = await res.json();
+      return {
+        success: true,
+        data: resJson,
+        latencyMs: tElapsed
+      };
+    } finally {
+      clearTimeout(timeoutId);
     }
-
-    const resJson = await res.json();
-    return {
-      success: true,
-      data: resJson,
-      latencyMs: tElapsed
-    };
   };
 
   /**
@@ -1193,15 +1347,18 @@ document.addEventListener("DOMContentLoaded", () => {
     if (executionOutput) executionOutput.value = "Awaiting decision from backend...";
     if (agentActionText) agentActionText.textContent = "Evaluating text-only fallback...";
 
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 5000);
     try {
-      const apiRes = await fetch("http://localhost:8000/api/context", {
+      const apiRes = await fetch("http://127.0.0.1:8000/api/context", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           title: pageData?.title || "Unknown Title",
           url: pageData?.url || "Unknown URL",
           redactedSample: pageData?.redactedSample || ""
-        })
+        }),
+        signal: controller.signal
       });
 
       if (apiRes.ok) {
@@ -1284,7 +1441,7 @@ document.addEventListener("DOMContentLoaded", () => {
           try {
             await chrome.scripting.executeScript({
               target: { tabId },
-              files: ["form-profile.js", "pii-detector.js", "content.js"]
+              files: ["form-profile.js", "pii-detector.js", "change-detector.js", "content.js"]
             });
             await new Promise((r) => setTimeout(r, 150));
           } catch (_) { }
@@ -1378,6 +1535,50 @@ document.addEventListener("DOMContentLoaded", () => {
   };
 
   /**
+   * Robust, deterministic helper to check whether a candidate target matches a requested field hint.
+   * Enforces semantic compatibility, whole-word matching, and synonym coverage.
+   * Prevents unrelated page text (e.g. "Switch accounts") from substituting form fields.
+   */
+  const isFieldMatch = (targetLabel, fieldHint) => {
+    if (!targetLabel || !fieldHint) return false;
+    const tNorm = (targetLabel || "").toLowerCase().replace(/[:*#_\-\/\\]+/g, " ").trim();
+    const hNorm = (fieldHint || "").toLowerCase().replace(/[:*#_\-\/\\]+/g, " ").trim();
+    if (!tNorm || !hNorm) return false;
+    if (tNorm === hNorm) return true;
+
+    // Direct substring match only when hint length >= 3 to avoid spurious collisions on 1-2 char words
+    if (hNorm.length >= 3 && tNorm.includes(hNorm)) return true;
+    if (tNorm.length >= 3 && hNorm.includes(tNorm)) return true;
+
+    // Meaningful token overlap (tokens >= 3 chars)
+    const tTokens = tNorm.split(/\s+/).filter((w) => w.length >= 3);
+    const hTokens = hNorm.split(/\s+/).filter((w) => w.length >= 3);
+    for (const ht of hTokens) {
+      if (tTokens.includes(ht)) return true;
+    }
+
+    // Pre-registered generic semantic synonyms for form fields
+    const SYNONYMS = {
+      name: ["name", "full name", "your name", "first name", "applicant name", "student name", "candidate name"],
+      email: ["email", "e-mail", "mail", "email address", "your email"],
+      phone: ["phone", "mobile", "contact", "telephone", "phone number", "mobile number", "contact number"],
+      college: ["college", "university", "institution", "school", "college name", "campus"],
+      subject: ["subject", "topic", "title", "subject line"],
+      recipient: ["recipient", "recipients", "to", "receiver", "to recipients"],
+      message: ["message", "body", "comments", "description", "text", "message body"],
+      address: ["address", "street", "residential address", "home address", "postal address"]
+    };
+
+    for (const [key, synList] of Object.entries(SYNONYMS)) {
+      const hMatch = hNorm === key || synList.some((s) => hNorm.includes(s));
+      const tMatch = tNorm === key || synList.some((s) => tNorm.includes(s));
+      if (hMatch && tMatch) return true;
+    }
+
+    return false;
+  };
+
+  /**
    * Helper to execute the core local perception pipeline (M7-M12) once.
    * Returns a promise resolving with { tab, pageData, redactionResult }.
    */
@@ -1468,7 +1669,7 @@ document.addEventListener("DOMContentLoaded", () => {
             try {
               await chrome.scripting.executeScript({
                 target: { tabId: tab.id },
-                files: ["pii-detector.js", "content.js"]
+                files: ["form-profile.js", "pii-detector.js", "change-detector.js", "content.js"]
               });
 
               chrome.tabs.sendMessage(tab.id, { action: "getPageInfo" }, (retryResponse) => {
@@ -1506,12 +1707,17 @@ document.addEventListener("DOMContentLoaded", () => {
           const riskColor = (t.risk === "HIGH" || t.risk === "CRITICAL") ? "#b91c1c" : ((t.risk === "MEDIUM") ? "#b45309" : "#3730a3");
           const riskBg = (t.risk === "HIGH" || t.risk === "CRITICAL") ? "#fee2e2" : ((t.risk === "MEDIUM") ? "#fef3c7" : "#e0e7ff");
           const actType = (t.action?.action || "NONE").toUpperCase();
-          const actBadgeClass = actType === "FILL" ? "badge-action-fill" : (actType === "CLICK" ? "badge-action-click" : (actType === "SUBMIT" ? "badge-action-submit" : "badge-action-none"));
+          const actBadgeClass = actType === "FILL" ? "badge-action-fill" :
+            (actType === "CLICK" ? "badge-action-click" :
+              (actType === "SUBMIT" ? "badge-action-submit" :
+                (actType === "SELECT" ? "badge-action-select" :
+                  (["CHECK", "UNCHECK", "TOGGLE"].includes(actType) ? "badge-action-check" : "badge-action-none"))));
+          const stepTotal = t.totalSteps || (typeof totalPlannedSteps !== "undefined" && totalPlannedSteps ? totalPlannedSteps : Math.max(t.step || 1, 1));
 
           html += `<div style="border: 1px solid #e2e8f0; border-radius: 6px; padding: 6px 8px; margin-bottom: 6px; background: #ffffff; box-shadow: 0 1px 2px rgba(0,0,0,0.03);">
             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
-              <div style="display: flex; align-items: center; gap: 5px;">
-                <span style="font-weight: 700; color: #1e40af; font-size: 11px;">STEP ${t.step} / ${t.totalSteps || 1}</span>
+              <div style="display: flex; align-items: center; gap: 6px;">
+                <span style="font-weight: 700; color: #1e40af; font-size: 11px;">STEP ${t.step} / ${stepTotal}</span> 
                 <span class="action-badge ${actBadgeClass}">${escapeHtml(actType)}</span>
               </div>
               <span style="font-size: 8.5px; padding: 1px 5px; border-radius: 3px; font-weight: bold; background: ${riskBg}; color: ${riskColor};">[${t.risk || "LOW"}]</span>
@@ -1533,7 +1739,7 @@ document.addEventListener("DOMContentLoaded", () => {
                   <div>• <strong>Grounding:</strong> ${escapeHtml(t.groundingStr || "Target matched")}</div>
                   <div>• <strong>Safety Gate:</strong> ${escapeHtml(t.safetyDecision || "ALLOWED")} (Approval: ${escapeHtml(t.humanApproval || "NOT REQUIRED")})</div>
                   ${t.verificationDetails && t.verificationDetails.evidence ? `<div>• <strong>Verification Evidence:</strong> ${escapeHtml(Object.entries(t.verificationDetails.evidence).filter(([_, v]) => v).map(([k]) => k).join(", ") || "State evaluated")}</div>` : ""}
-                  ${t.recovery ? `<div style="color: #0369a1; font-weight: bold;">• <strong>Recovery:</strong> ${escapeHtml(t.recovery)}</div>` : ""}
+                  ${t.recovery ? `<div style="color: #0369a1; font-weight: bold;">• <strong>Recovery:</strong> ${escapeHtml(typeof t.recovery === "object" ? `[${t.recovery.result}] ${t.recovery.reason || "Outcome processed"}${t.recovery.recoveryAction ? ` (Action: ${t.recovery.recoveryAction})` : ""}` : t.recovery)}</div>` : ""}
                 </div>
               </details>
             </div>
@@ -1738,7 +1944,30 @@ document.addEventListener("DOMContentLoaded", () => {
       let currentStep = 1;
       let currentRequestId = "-";
 
+      // TASK STATE ISOLATION (M23): Ensure previous task plan/perception state never leaks into new task
+      latestVisualElements = null;
+      latestFusedElements = null;
+      latestSensitiveRegions = null;
+      latestOcrSensitiveRegions = [];
+      latestMergedRegions = null;
+      latestVisionResult = null;
+      cachedLightweightSignature = null;
+      cachedPerceptionTimestamp = 0;
+      lastExecutedActionType = null;
+      lastStepVerification = null;
+
       try {
+        // Retrieve active tab metadata if available for plan context
+        let pageTitle = document.title;
+        let pageUrl = window.location.href;
+        try {
+          const initialTabs = await chrome.tabs.query({ active: true, currentWindow: true });
+          if (initialTabs && initialTabs[0]) {
+            pageTitle = initialTabs[0].title || pageTitle;
+            pageUrl = initialTabs[0].url || pageUrl;
+          }
+        } catch (_) {}
+
         // Milestone 16: Local deterministic NL task parser (client-side only; values never transmitted)
         let parsedTask = null;
         if (window.SIHTaskParser && typeof window.SIHTaskParser.parseTask === "function") {
@@ -1750,8 +1979,8 @@ document.addEventListener("DOMContentLoaded", () => {
         let reasoningPlan = null;
         if (window.SIHReasoningPlanner && typeof window.SIHReasoningPlanner.planTask === "function") {
           reasoningPlan = window.SIHReasoningPlanner.planTask(parsedTask, {
-            title: document.title,
-            url: window.location.href
+            title: pageTitle,
+            url: pageUrl
           });
         }
         console.log("[SIH26171] Reasoning plan created");
@@ -1838,6 +2067,16 @@ document.addEventListener("DOMContentLoaded", () => {
         // AGENT SESSION ISOLATION (Milestone 17 Production Hardening):
         // A new task execution must NEVER inherit approval state, stale actions, or prior plan state.
         previousScreenSignature = null;
+        cachedLightweightSignature = null;
+        cachedPerceptionTimestamp = 0;
+        lastExecutedActionType = null;
+        lastStepVerification = null;
+        lastPerceptionDecision = { reused: false, reason: "FRESH — Initial observation (Step 1)", probeMs: 0 };
+        perceptionTelemetryStats = {
+          fullPerceptionPasses: 0,
+          reusedPerceptionPasses: 0,
+          totalProbeMs: 0
+        };
         executionTraceHistory = [];
         let lastActionKey = null;
         renderTraceHistory();
@@ -1845,13 +2084,14 @@ document.addEventListener("DOMContentLoaded", () => {
         if (pipelineStepCounter) {
           pipelineStepCounter.textContent = isPlannedTask ? `Step 1 of ${totalPlannedSteps}` : `Step 1 of ${MAX_AGENT_STEPS}`;
         }
+        const firstStepPlan = isPlannedTask && plannedSteps ? plannedSteps[0] : null;
         updateCurrentActionCard({
           stepText: isPlannedTask ? `STEP 1 / ${totalPlannedSteps}` : `STEP 1 / ${MAX_AGENT_STEPS}`,
-          action: "OBSERVE",
-          target: originalUserTask,
-          value: "",
+          action: firstStepPlan ? firstStepPlan.type : "PERCEIVE",
+          target: firstStepPlan ? (firstStepPlan.target || firstStepPlan.targetHint || firstStepPlan.fieldHint || "Page Context") : "Page Context",
+          value: firstStepPlan?.value || "",
           grounding: "Local Observation",
-          risk: "LOW",
+          risk: firstStepPlan?.risk || "LOW",
           safety: "ANALYZING",
           status: "Starting agent..."
         });
@@ -1882,27 +2122,613 @@ document.addEventListener("DOMContentLoaded", () => {
           window.SIHEvaluationTracker.recordTaskStart(currentRequestId, task);
         }
 
+        /**
+         * M21.3: Executes controlled recovery after an action failure (execution or verification).
+         * Enforces strict single-recovery limit per action, fresh on-device perception,
+         * anti-stale grounding, target validation, safety gate re-check, and outcome verification.
+         */
+        const attemptControlledRecovery = async ({
+          currentStep,
+          totalSteps,
+          activeTab,
+          originalAction,
+          currentStepPlan,
+          initialFailureReason,
+          requestId
+        }) => {
+          console.log("[M21][RECOVERY] start");
+          console.log("[M21][RECOVERY] failure detected");
+
+          appendPlannerTrace(`Step ${currentStep} failure detected: ${initialFailureReason}`);
+          appendPlannerTrace("Recovery:");
+          appendPlannerTrace("Re-perceiving page...");
+
+          if (agentStepText) agentStepText.textContent = `Step ${currentStep}: CONTROLLED RECOVERY`;
+          if (agentVerificationText) {
+            agentVerificationText.textContent = "Recovery: Re-perceiving page...";
+            agentVerificationText.style.color = "#d97706";
+          }
+          setAgentState(AGENT_STATES.REPERCEIVE, "Recovery: Re-perceiving page...");
+
+          // 1. Re-perceive current page using local pipeline (on-device, zero PII transmission)
+          console.log("[M21][RECOVERY] re-perceiving current page");
+          let freshPageData = null;
+          let freshElements = [];
+          let recoveryTab = activeTab;
+          try {
+            if (recoveryTab && recoveryTab.id) {
+              await waitForTabReady(recoveryTab.id, 4000);
+            }
+            resetPipelineState();
+            lastPerceptionDecision = { reused: false, reason: "FRESH — Recovery", probeMs: 0 };
+            perceptionTelemetryStats.fullPerceptionPasses++;
+            const pipelineOutput = await runLocalPipeline();
+            if (pipelineOutput) {
+              recoveryTab = pipelineOutput.tab || activeTab;
+              freshPageData = pipelineOutput.pageData;
+              freshElements = latestFusedElements || latestVisualElements || (freshPageData && freshPageData.visualElements) || [];
+              cachedPerceptionTimestamp = Date.now();
+            }
+          } catch (e) {
+            console.warn("Re-perception error:", e);
+            try {
+              const fallbackInfo = await new Promise((res) => {
+                chrome.tabs.sendMessage(activeTab.id, { action: "getPageInfo" }, (r) => res(r || null));
+              });
+              if (fallbackInfo) {
+                freshPageData = fallbackInfo;
+                freshElements = fallbackInfo.visualElements || [];
+              }
+            } catch (_) {}
+          }
+
+          if (!freshElements || freshElements.length === 0) {
+            console.log("[M21][RECOVERY] target not found");
+            appendPlannerTrace("Target not found on current page");
+            appendPlannerTrace("Recovery aborted");
+            appendPlannerTrace("Final: Action failed safely");
+            return window.SIHActionVerifier?.createRecoveryResult ? window.SIHActionVerifier.createRecoveryResult({
+              attempted: true,
+              allowed: false,
+              result: "FAILED",
+              reason: "Target not found on current page after re-perception",
+              recoveryAction: originalAction?.action || null,
+              safetyChecked: false
+            }) : {
+              attempted: true,
+              allowed: false,
+              result: "FAILED",
+              reason: "Target not found on current page after re-perception",
+              recoveryAction: originalAction?.action || null,
+              safetyChecked: false
+            };
+          }
+
+          // 2. Re-ground the original intended target against fresh perception (ANTI-STALE PROTECTION)
+          console.log("[M21][RECOVERY] re-grounding target");
+          const normalize = (s) => (s || "").trim().toLowerCase();
+          const actionType = (originalAction?.action || (currentStepPlan && currentStepPlan.type) || "CLICK").toUpperCase();
+
+          let matchedCandidate = null;
+          let matchedCandidateIdx = -1;
+          let groundingScore = 0;
+
+          if (actionType === "CLICK") {
+            const isExplicitTarget = Boolean(currentStepPlan && currentStepPlan.isExplicitTarget);
+            const targetHint = normalize(
+              (currentStepPlan && (currentStepPlan.explicitTarget || currentStepPlan.targetHint || currentStepPlan.legacyTarget)) ||
+              originalAction.targetLabel ||
+              originalAction.target ||
+              ""
+            ).replace(/_button|_input/, "").trim();
+
+            const computeClickScore = (el) => {
+              if (!el) return 0;
+              if (el.disabled || String(el["aria-disabled"]).toLowerCase() === "true" || el.readOnly) return 0;
+              const elType = (el.type || "").toLowerCase();
+              if (!["button", "link", "input", "element", "textarea", "select"].includes(elType)) return 0;
+              const labelNorm = normalize(el.label);
+              if (!labelNorm && !targetHint) return 0;
+
+              if (isExplicitTarget && targetHint) {
+                if (labelNorm === targetHint) return 1.0;
+                if (labelNorm.includes(targetHint)) return 0.95;
+                const tokens = targetHint.split(/\s+/).filter(t => t.length > 2);
+                if (tokens.length > 0 && tokens.every(t => labelNorm.includes(t))) return 0.90;
+                return 0;
+              }
+
+              if (labelNorm === targetHint) return 1.0;
+              if (targetHint && (labelNorm.includes(targetHint) || targetHint.includes(labelNorm))) return 0.85;
+              const tokens = targetHint.split(/\s+/).filter(t => t.length > 2);
+              if (tokens.length > 0 && tokens.every(t => labelNorm.includes(t))) return 0.80;
+              return 0;
+            };
+
+            freshElements.forEach((el, idx) => {
+              let s = computeClickScore(el);
+              if (s > 0 && el.isVisualConfirmed) s = Math.min(1.0, s + 0.10);
+              if (s > groundingScore) {
+                groundingScore = s;
+                matchedCandidate = el;
+                matchedCandidateIdx = idx;
+              }
+            });
+          } else if (actionType === "FILL" || actionType === "FILL_FORM") {
+            const rawHint = (currentStepPlan && (currentStepPlan.fieldHint || currentStepPlan.targetHint)) ||
+              originalAction.targetLabel ||
+              originalAction.target ||
+              "";
+            const fieldHint = normalize(rawHint);
+            freshElements.forEach((el, idx) => {
+              if (!el || el.disabled || String(el["aria-disabled"]).toLowerCase() === "true" || el.readOnly) return;
+              const elType = (el.type || "").toLowerCase();
+              if (!["input", "textarea", "select"].includes(elType)) return;
+              let s = 0;
+              if (isFieldMatch(el.label, rawHint)) s = 1.0;
+              else {
+                const labelNorm = normalize(el.label);
+                if (fieldHint && labelNorm === fieldHint) s = 1.0;
+                else if (fieldHint && fieldHint.length >= 3 && (labelNorm.includes(fieldHint) || fieldHint.includes(labelNorm))) s = 0.85;
+                else if (!fieldHint) s = 0.70;
+              }
+              if (s > groundingScore) {
+                groundingScore = s;
+                matchedCandidate = el;
+                matchedCandidateIdx = idx;
+              }
+            });
+          } else if (actionType === "SUBMIT") {
+            freshElements.forEach((el, idx) => {
+              if (!el || el.disabled || String(el["aria-disabled"]).toLowerCase() === "true") return;
+              const elType = (el.type || "").toLowerCase();
+              const labelNorm = normalize(el.label);
+              if (elType === "button" && (labelNorm.includes("submit") || labelNorm.includes("search") || el.semanticTag === "SUBMIT_BUTTON")) {
+                matchedCandidate = el;
+                matchedCandidateIdx = idx;
+                groundingScore = 1.0;
+              } else if (elType === "input" && (el.semanticTag === "SEARCH_INPUT" || labelNorm.includes("search"))) {
+                if (groundingScore < 0.9) {
+                  matchedCandidate = el;
+                  matchedCandidateIdx = idx;
+                  groundingScore = 0.9;
+                }
+              }
+            });
+            if (!matchedCandidate) {
+              matchedCandidate = { label: "search", type: "input", x: 0, y: 0, width: 0, height: 0 };
+              matchedCandidateIdx = 0;
+              groundingScore = 0.8;
+            }
+          } else if (actionType === "SCROLL") {
+            matchedCandidate = { label: "PAGE", type: "element" };
+            matchedCandidateIdx = 0;
+            groundingScore = 1.0;
+          } else if (["CHECK", "UNCHECK", "SELECT", "TOGGLE"].includes(actionType)) {
+            const rawHint = (currentStepPlan && (currentStepPlan.targetHint || currentStepPlan.target)) ||
+              originalAction?.targetLabel ||
+              originalAction?.target ||
+              "";
+            const targetHint = normalize(rawHint).replace(/[:*#_\-\/\\]+/g, " ").replace(/\s+(?:box|checkbox|option|button|link|switch|radio)$/i, "").trim();
+            const stepContext = (currentStepPlan && currentStepPlan.context) || originalAction?.context || null;
+            const ctxNorm = stepContext ? normalize(stepContext) : null;
+
+            // Verify context presence on fresh perception if specified
+            let contextValid = true;
+            if (ctxNorm) {
+              contextValid = freshElements.some(el => {
+                const lbl = normalize(el.label);
+                return lbl.includes(ctxNorm) || ctxNorm.includes(lbl);
+              });
+            }
+
+            if (contextValid) {
+              const matches = [];
+              freshElements.forEach((el, idx) => {
+                if (!el || el.disabled || String(el["aria-disabled"]).toLowerCase() === "true" || el.readOnly) return;
+                const elType = (el.type || "").toLowerCase();
+                const labelNorm = normalize(el.label).replace(/[:*#_\-\/\\]+/g, " ").trim();
+
+                let typeBonus = 0;
+                if (["CHECK", "UNCHECK"].includes(actionType) && (elType === "checkbox" || el.semanticTag === "CHECKBOX")) typeBonus = 0.2;
+                if (actionType === "SELECT" && (elType === "option" || elType === "button" || elType === "radio" || elType === "link" || elType === "element")) typeBonus = 0.1;
+                if (actionType === "TOGGLE" && (elType === "switch" || elType === "checkbox" || elType === "button")) typeBonus = 0.2;
+
+                if (labelNorm === targetHint || labelNorm.includes(targetHint) || targetHint.includes(labelNorm)) {
+                  const exact = (labelNorm === targetHint) ? 1.0 : 0.85;
+                  matches.push({ el, idx, score: exact + typeBonus });
+                }
+              });
+
+              if (matches.length > 0) {
+                matches.sort((a, b) => b.score - a.score);
+                const ordinal = currentStepPlan?.ordinal !== undefined ? currentStepPlan.ordinal : originalAction?.ordinal;
+                if (typeof ordinal === "number" && ordinal >= 1 && ordinal <= matches.length) {
+                  matchedCandidate = matches[ordinal - 1].el;
+                  matchedCandidateIdx = matches[ordinal - 1].idx;
+                  groundingScore = matches[ordinal - 1].score;
+                } else {
+                  matchedCandidate = matches[0].el;
+                  matchedCandidateIdx = matches[0].idx;
+                  groundingScore = matches[0].score;
+                }
+              }
+            }
+          }
+
+          if (!matchedCandidate) {
+            console.log("[M21][RECOVERY] target not found");
+            appendPlannerTrace("Target not confidently grounded");
+            appendPlannerTrace("Recovery aborted");
+            appendPlannerTrace("Final: Action failed safely");
+            return window.SIHActionVerifier?.createRecoveryResult ? window.SIHActionVerifier.createRecoveryResult({
+              attempted: true,
+              allowed: false,
+              result: "FAILED",
+              reason: "Target not found during re-grounding",
+              recoveryAction: actionType,
+              safetyChecked: false
+            }) : {
+              attempted: true,
+              allowed: false,
+              result: "FAILED",
+              reason: "Target not found during re-grounding",
+              recoveryAction: actionType,
+              safetyChecked: false
+            };
+          }
+
+          // 3. Validate target (presence, enabled, usable, unambiguous, confidence)
+          let validation = { valid: true, reason: "Target validated" };
+          if (window.SIHActionVerifier && typeof window.SIHActionVerifier.validateRecoveryTarget === "function") {
+            validation = window.SIHActionVerifier.validateRecoveryTarget(
+              matchedCandidate,
+              freshElements,
+              { action: actionType, targetLabel: matchedCandidate.label, targetType: matchedCandidate.type, groundingScore }
+            );
+          } else {
+            if (matchedCandidate.disabled || String(matchedCandidate["aria-disabled"]).toLowerCase() === "true" || matchedCandidate.readOnly) {
+              validation = { valid: false, reason: "Target element is disabled or read-only" };
+            } else if (groundingScore < 0.40) {
+              validation = { valid: false, reason: "Target grounding confidence too low" };
+            }
+          }
+
+          if (!validation.valid) {
+            if (validation.reason && validation.reason.includes("ambiguous")) {
+              console.log("[M21][RECOVERY] target ambiguous");
+              appendPlannerTrace("Target ambiguous");
+            } else {
+              console.log("[M21][RECOVERY] target not found");
+              appendPlannerTrace(validation.reason);
+            }
+            appendPlannerTrace("Recovery aborted");
+            appendPlannerTrace("Final: Action failed safely");
+            return window.SIHActionVerifier?.createRecoveryResult ? window.SIHActionVerifier.createRecoveryResult({
+              attempted: true,
+              allowed: false,
+              result: "FAILED",
+              reason: validation.reason,
+              recoveryAction: actionType,
+              safetyChecked: false
+            }) : {
+              attempted: true,
+              allowed: false,
+              result: "FAILED",
+              reason: validation.reason,
+              recoveryAction: actionType,
+              safetyChecked: false
+            };
+          }
+
+          console.log("[M21][RECOVERY] target validated");
+          appendPlannerTrace("Target re-grounded");
+
+          // 4. Existing Safety Gate Re-check (Never bypass safety; block high-risk actions)
+          console.log("[M21][RECOVERY] safety check");
+          const recoveryAction = {
+            action: actionType,
+            target: matchedCandidate.label,
+            targetIndex: matchedCandidate.index !== undefined ? matchedCandidate.index : matchedCandidateIdx,
+            targetType: matchedCandidate.type,
+            targetLabel: matchedCandidate.label,
+            context: (currentStepPlan && currentStepPlan.context) || originalAction?.context || null,
+            relation: (currentStepPlan && currentStepPlan.relation) || originalAction?.relation || null,
+            ordinal: (currentStepPlan && currentStepPlan.ordinal !== undefined) ? currentStepPlan.ordinal : (originalAction?.ordinal !== undefined ? originalAction.ordinal : null),
+            value: originalAction?.value,
+            amount: originalAction?.amount,
+            groundingScore: groundingScore,
+            groundingMethod: matchedCandidate.isVisualConfirmed ? "recovery-dom+visual-fusion" : "recovery-reground"
+          };
+
+          let recoverySafety = { allowed: true, requiresApproval: false, risk: "LOW" };
+          if (window.SIHReasoningPlanner && typeof window.SIHReasoningPlanner.evaluateSafetyGate === "function") {
+            recoverySafety = window.SIHReasoningPlanner.evaluateSafetyGate(
+              recoveryAction,
+              currentStepPlan,
+              null, // Recovery cannot invent approval tokens; destructive/high-risk actions are blocked
+              { url: recoveryTab?.url, title: freshPageData?.title, visualElements: freshElements }
+            );
+          }
+
+          // High-risk or consequential actions MUST NOT be automatically retried
+          if (!recoverySafety.allowed || recoverySafety.requiresApproval || recoverySafety.risk === "HIGH" || recoverySafety.risk === "CRITICAL") {
+            console.log("[M21][RECOVERY] blocked by safety gate");
+            appendPlannerTrace("Safety: BLOCKED");
+            appendPlannerTrace("Recovery aborted");
+            appendPlannerTrace("Final: Action failed safely");
+            return window.SIHActionVerifier?.createRecoveryResult ? window.SIHActionVerifier.createRecoveryResult({
+              attempted: true,
+              allowed: false,
+              result: "BLOCKED",
+              reason: recoverySafety.reason || "Consequential action blocked by Safety Gate",
+              recoveryAction: actionType,
+              safetyChecked: true
+            }) : {
+              attempted: true,
+              allowed: false,
+              result: "BLOCKED",
+              reason: recoverySafety.reason || "Consequential action blocked by Safety Gate",
+              recoveryAction: actionType,
+              safetyChecked: true
+            };
+          }
+
+          appendPlannerTrace("Safety: ALLOWED");
+          appendPlannerTrace(`Recovery action: ${recoveryAction.action}`);
+
+          // 5. One recovery action (executed exactly ONCE)
+          console.log("[M21][RECOVERY] action executed");
+          setAgentState(AGENT_STATES.EXECUTE, `Recovery: Executing ${recoveryAction.action}...`);
+
+          const preRecoveryState = {
+            url: (freshPageData && freshPageData.url) || recoveryTab?.url || "",
+            title: (freshPageData && freshPageData.title) || recoveryTab?.title || "",
+            scrollX: (freshPageData && freshPageData.viewport && typeof freshPageData.viewport.scrollX === "number") ? freshPageData.viewport.scrollX : 0,
+            scrollY: (freshPageData && freshPageData.viewport && typeof freshPageData.viewport.scrollY === "number") ? freshPageData.viewport.scrollY : 0,
+            visualElements: freshElements,
+            elementCount: freshElements.length
+          };
+
+          const recoveryPayload = {
+            action: recoveryAction.action,
+            target: recoveryAction.target,
+            targetIndex: recoveryAction.targetIndex,
+            targetType: recoveryAction.targetType,
+            targetLabel: recoveryAction.targetLabel,
+            context: recoveryAction.context,
+            relation: recoveryAction.relation,
+            ordinal: recoveryAction.ordinal,
+            localValue: recoveryAction.value,
+            value: recoveryAction.value,
+            amount: recoveryAction.amount
+          };
+
+          let recoveryExecRes = null;
+          await new Promise((resolveExec) => {
+            chrome.tabs.sendMessage(
+              recoveryTab.id,
+              { action: "executeAction", payload: recoveryPayload },
+              (res) => {
+                if (chrome.runtime.lastError) {
+                  recoveryExecRes = { executed: false, reason: chrome.runtime.lastError.message };
+                } else if (res && res.result) {
+                  recoveryExecRes = res.result;
+                } else {
+                  recoveryExecRes = { executed: false, reason: "No execution response" };
+                }
+                resolveExec();
+              }
+            );
+          });
+
+          // 6. Verify again using M21 verification
+          if (recoveryAction.action === "SUBMIT" || recoveryAction.action === "CLICK") {
+            await waitForTabReady(recoveryTab.id, 4000);
+          } else {
+            await new Promise((r) => setTimeout(r, 600));
+          }
+
+          let postRecoveryPageData = null;
+          const postRecoveryElements = await new Promise((resolveDom) => {
+            chrome.tabs.sendMessage(recoveryTab.id, { action: "getPageInfo" }, (resp) => {
+              if (resp && resp.success) {
+                postRecoveryPageData = resp;
+                resolveDom(resp.visualElements || freshElements);
+              } else {
+                resolveDom(freshElements);
+              }
+            });
+          });
+
+          const postRecoveryState = {
+            url: (postRecoveryPageData && postRecoveryPageData.url) || recoveryTab?.url || "",
+            title: (postRecoveryPageData && postRecoveryPageData.title) || recoveryTab?.title || "",
+            scrollX: (postRecoveryPageData && postRecoveryPageData.viewport && typeof postRecoveryPageData.viewport.scrollX === "number") ? postRecoveryPageData.viewport.scrollX : 0,
+            scrollY: (postRecoveryPageData && postRecoveryPageData.viewport && typeof postRecoveryPageData.viewport.scrollY === "number") ? postRecoveryPageData.viewport.scrollY : 0,
+            visualElements: postRecoveryElements || [],
+            elementCount: (postRecoveryElements || []).length
+          };
+
+          let recoveryVerif = null;
+          if (window.SIHActionVerifier && typeof window.SIHActionVerifier.verifyActionOutcome === "function") {
+            recoveryVerif = window.SIHActionVerifier.verifyActionOutcome(
+              preRecoveryState,
+              postRecoveryState,
+              recoveryAction,
+              recoveryExecRes
+            );
+          } else {
+            const isSuccess = recoveryExecRes && recoveryExecRes.executed;
+            recoveryVerif = {
+              status: isSuccess ? "VERIFIED" : "FAILED",
+              verified: isSuccess,
+              actionType: recoveryAction.action,
+              reason: isSuccess ? "Action executed successfully" : "Execution failed"
+            };
+          }
+
+          if (recoveryVerif.status === "VERIFIED") {
+            console.log("[M21][RECOVERY] verification=VERIFIED");
+            appendPlannerTrace("Verification: VERIFIED");
+            appendPlannerTrace("Final: Recovery successful");
+            if (agentVerificationText) {
+              agentVerificationText.textContent = `VERIFIED: ${recoveryVerif.reason}`;
+              agentVerificationText.style.color = "#2e7d32";
+            }
+            return {
+              attempted: true,
+              allowed: true,
+              result: "VERIFIED",
+              reason: recoveryVerif.reason,
+              recoveryAction: recoveryAction.action,
+              safetyChecked: true,
+              verificationDetails: recoveryVerif,
+              actionExecutedSuccessfully: true,
+              agentAction: recoveryAction
+            };
+          } else if (recoveryVerif.status === "FAILED") {
+            console.log("[M21][RECOVERY] verification=FAILED");
+            appendPlannerTrace("Verification: FAILED");
+            appendPlannerTrace("Final: Action failed safely");
+            if (agentVerificationText) {
+              agentVerificationText.textContent = `FAILED: ${recoveryVerif.reason}`;
+              agentVerificationText.style.color = "#dc2626";
+            }
+            return {
+              attempted: true,
+              allowed: true,
+              result: "FAILED",
+              reason: recoveryVerif.reason,
+              recoveryAction: recoveryAction.action,
+              safetyChecked: true,
+              verificationDetails: recoveryVerif,
+              actionExecutedSuccessfully: false
+            };
+          } else {
+            console.log("[M21][RECOVERY] verification=UNKNOWN");
+            appendPlannerTrace("Verification: UNKNOWN");
+            appendPlannerTrace("Final: Action failed safely");
+            if (agentVerificationText) {
+              agentVerificationText.textContent = `UNKNOWN: ${recoveryVerif.reason}`;
+              agentVerificationText.style.color = "#d97706";
+            }
+            return {
+              attempted: true,
+              allowed: true,
+              result: "UNKNOWN",
+              reason: recoveryVerif.reason,
+              recoveryAction: recoveryAction.action,
+              safetyChecked: true,
+              verificationDetails: recoveryVerif,
+              actionExecutedSuccessfully: false
+            };
+          }
+        };
+
         while (currentStep <= (isPlannedTask ? totalPlannedSteps : MAX_AGENT_STEPS)) {
           const requestId = "SIH-" + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
           currentRequestId = requestId;
           let stepRecoveryNote = null;
-          resetPipelineState();
-          setAgentState(AGENT_STATES.PERCEIVE, `Observing page state for step ${currentStep}...`);
+          let recoveryAttempted = false;
+
+          // Milestone 22.2: Fast local structural page probe before resetting pipeline state
+          const plannedStepForProbe = isPlannedTask && plannedSteps ? plannedSteps[currentStep - 1] : null;
+          const nextActionType = plannedStepForProbe ? plannedStepForProbe.type : null;
+
+          let probeActiveTab = null;
+          let probeResult = null;
+          let probeMs = 0;
+          try {
+            const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+            probeActiveTab = (tabs && tabs[0]) || null;
+            if (!probeActiveTab || !probeActiveTab.id) {
+              const fallbackTabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+              probeActiveTab = (fallbackTabs && fallbackTabs[0]) || null;
+            }
+            if (probeActiveTab && probeActiveTab.id) {
+              const tProbe0 = performance.now();
+              probeResult = await new Promise((res) => {
+                chrome.tabs.sendMessage(probeActiveTab.id, { action: "getLightweightPageState" }, (r) => {
+                  if (chrome.runtime.lastError || !r || !r.success) {
+                    res(null);
+                  } else {
+                    res(r);
+                  }
+                });
+              });
+              probeMs = Math.round(performance.now() - tProbe0);
+              timing.pageProbeMs = probeMs;
+            }
+          } catch (_) {
+            probeResult = null;
+          }
+
+          let currentLightweightSignature = null;
+          if (probeResult && probeResult.signature) {
+            currentLightweightSignature = probeResult.signature;
+          } else if (probeResult && window.SIHChangeDetector && typeof window.SIHChangeDetector.computeLightweightDomSignature === "function") {
+            currentLightweightSignature = window.SIHChangeDetector.computeLightweightDomSignature(
+              probeResult.structuralElements || [],
+              { url: probeResult.url, title: probeResult.title, viewport: probeResult.viewport }
+            );
+          }
+
+          const hasCachedPerceptionData = Boolean(
+            latestVisualElements &&
+            latestVisualElements.length > 0 &&
+            latestScreenshotDataUrl
+          );
+
+          const perceptionDecision = canReusePerception({
+            lastAction: lastExecutedActionType,
+            nextActionType: nextActionType,
+            previousSignature: cachedLightweightSignature,
+            currentSignature: currentLightweightSignature,
+            currentStep: currentStep,
+            verificationResult: lastStepVerification,
+            cachedAt: cachedPerceptionTimestamp,
+            forceFresh: false,
+            hasCachedData: hasCachedPerceptionData
+          });
+
+          lastPerceptionDecision = {
+            reused: perceptionDecision.canReuse,
+            reason: perceptionDecision.reason,
+            probeMs: probeMs
+          };
+
+          if (perceptionDecision.canReuse) {
+            perceptionTelemetryStats.reusedPerceptionPasses++;
+            perceptionTelemetryStats.totalProbeMs += probeMs;
+            console.log(`[SIH26171][ADAPTIVE] Reusing cached perception: ${perceptionDecision.reason} (Probe: ${probeMs}ms)`);
+            appendPlannerTrace(`Perception: ${perceptionDecision.reason} (Probe: ${probeMs}ms)`);
+            setAgentState(AGENT_STATES.PERCEIVE, `Reusing stable perception for step ${currentStep}...`);
+          } else {
+            perceptionTelemetryStats.fullPerceptionPasses++;
+            console.log(`[SIH26171][ADAPTIVE] Running fresh perception: ${perceptionDecision.reason}`);
+            appendPlannerTrace(`Perception: ${perceptionDecision.reason}`);
+            resetPipelineState();
+            setAgentState(AGENT_STATES.PERCEIVE, `Observing page state for step ${currentStep}...`);
+          }
 
           if (pipelineStepCounter) {
             pipelineStepCounter.textContent = isPlannedTask
               ? `Step ${currentStep} of ${totalPlannedSteps}`
               : `Step ${currentStep} of ${MAX_AGENT_STEPS}`;
           }
+          const stepPlanForPerceive = plannedStepForProbe;
           updateCurrentActionCard({
             stepText: isPlannedTask ? `STEP ${currentStep} / ${totalPlannedSteps}` : `STEP ${currentStep} / ${MAX_AGENT_STEPS}`,
-            action: "OBSERVE",
-            target: "Page DOM & Visual Context",
-            value: "",
-            grounding: "Perceiving...",
-            risk: "LOW",
+            action: stepPlanForPerceive ? stepPlanForPerceive.type : "PERCEIVE",
+            target: stepPlanForPerceive ? (stepPlanForPerceive.target || stepPlanForPerceive.targetHint || stepPlanForPerceive.fieldHint || "Page Context") : "Page DOM & Visual Context",
+            value: stepPlanForPerceive?.value || "",
+            grounding: perceptionDecision.canReuse ? "Reused Stable State" : "Perceiving...",
+            risk: stepPlanForPerceive?.risk || "LOW",
             safety: "PENDING",
-            status: `Observing page state for step ${currentStep}...`
+            status: perceptionDecision.canReuse
+              ? `Reusing stable page state (Probe: ${probeMs}ms)`
+              : `Perceiving page state for step ${currentStep}...`
           });
 
           // Update step & verification indicators
@@ -1914,20 +2740,32 @@ document.addEventListener("DOMContentLoaded", () => {
           if (agentVerificationText) {
             agentVerificationText.textContent = currentStep === 1
               ? "Observing initial page state..."
-              : "Observing updated page state...";
+              : (perceptionDecision.canReuse ? `Reusing verified state (${probeMs}ms probe)...` : "Observing updated page state...");
             agentVerificationText.style.color = "#1565c0";
           }
 
           // Show task in UI (never reveals literal extracted values in status)
           if (agentTaskText) agentTaskText.textContent = task;
           if (agentRequestId) agentRequestId.textContent = requestId;
-          if (agentScreenshotStatus) agentScreenshotStatus.textContent = "CAPTURING LOCALLY...";
+          if (agentScreenshotStatus) {
+            agentScreenshotStatus.textContent = perceptionDecision.canReuse
+              ? "REUSED (Stable Client-Side State)"
+              : "CAPTURING LOCALLY...";
+          }
           if (agentPrivacyStatus) agentPrivacyStatus.textContent = "ACTIVE";
-          if (agentDomPiiCount) agentDomPiiCount.textContent = "Scanning...";
-          if (agentOcrPiiCount) agentOcrPiiCount.textContent = "Scanning...";
-          if (agentSensitiveCount) agentSensitiveCount.textContent = "Calculating...";
-          if (agentRedactionStatus) agentRedactionStatus.textContent = "PROCESSING...";
-          if (agentSanitizedStatus) agentSanitizedStatus.textContent = "Awaiting Redaction...";
+          if (agentDomPiiCount) agentDomPiiCount.textContent = latestSensitiveRegions ? latestSensitiveRegions.length : (perceptionDecision.canReuse ? "0" : "Scanning...");
+          if (agentOcrPiiCount) agentOcrPiiCount.textContent = latestOcrSensitiveRegions ? latestOcrSensitiveRegions.length : (perceptionDecision.canReuse ? "0" : "Scanning...");
+          if (agentSensitiveCount) agentSensitiveCount.textContent = latestMergedRegions ? latestMergedRegions.length : (perceptionDecision.canReuse ? "0" : "Calculating...");
+          if (agentRedactionStatus) {
+            agentRedactionStatus.textContent = perceptionDecision.canReuse
+              ? "COMPLETE (Cached)"
+              : "PROCESSING...";
+          }
+          if (agentSanitizedStatus) {
+            agentSanitizedStatus.textContent = perceptionDecision.canReuse
+              ? "READY (Cached)"
+              : "Awaiting Redaction...";
+          }
           if (agentRawUploadStatus) {
             agentRawUploadStatus.textContent = "BLOCKED (Never transmitted)";
           }
@@ -1942,7 +2780,11 @@ document.addEventListener("DOMContentLoaded", () => {
           if (agentModeSubtext) agentModeSubtext.textContent = "";
           if (agentFallbackRow) agentFallbackRow.style.display = "none";
           if (agentActionText) agentActionText.textContent = "Awaiting pipeline...";
-          if (agentReasoningText) agentReasoningText.textContent = `Step ${currentStep}: Running local privacy pipeline...`;
+          if (agentReasoningText) {
+            agentReasoningText.textContent = perceptionDecision.canReuse
+              ? `Step ${currentStep}: Reusing stable on-device perception (Adaptive bypass)...`
+              : `Step ${currentStep}: Running local privacy pipeline...`;
+          }
           if (agentSafetyStatus) agentSafetyStatus.textContent = "Pending...";
           if (agentExecutionStatus) agentExecutionStatus.textContent = "Pending...";
           if (agentGatewayLatency) agentGatewayLatency.textContent = "-";
@@ -1952,10 +2794,23 @@ document.addEventListener("DOMContentLoaded", () => {
 
           let pipelineOutput = null;
           try {
-            // Step 1: Run local observation pipeline (reused once per cycle)
-            console.log("[SIH26171] Perception pipeline started");
-            pipelineOutput = await runLocalPipeline();
-            console.log("[SIH26171] Perception pipeline completed");
+            if (perceptionDecision.canReuse && latestPageData && probeActiveTab) {
+              pipelineOutput = {
+                tab: probeActiveTab,
+                pageData: latestPageData,
+                redactionResult: {
+                  success: true,
+                  sanitizedScreenshotDataUrl: latestSanitizedDataUrl || latestScreenshotDataUrl
+                }
+              };
+            } else {
+              // Step 1 or forced refresh: Run full local observation pipeline
+              console.log("[SIH26171] Perception pipeline started");
+              pipelineOutput = await runLocalPipeline();
+              console.log("[SIH26171] Perception pipeline completed");
+              cachedPerceptionTimestamp = Date.now();
+              cachedLightweightSignature = currentLightweightSignature;
+            }
           } catch (pipelineErr) {
             if (pipelineErr.isRestrictedPage) {
               if (agentSafetyStatus) agentSafetyStatus.textContent = "Browser Restricted Page";
@@ -2017,7 +2872,11 @@ document.addEventListener("DOMContentLoaded", () => {
           }
 
           // Update panel with local perception metrics
-          if (agentScreenshotStatus) agentScreenshotStatus.textContent = "CAPTURED LOCALLY (Client-Side Only)";
+          if (agentScreenshotStatus) {
+            agentScreenshotStatus.textContent = perceptionDecision.canReuse
+              ? "REUSED (Stable Client-Side State)"
+              : "CAPTURED LOCALLY (Client-Side Only)";
+          }
           if (agentDomPiiCount) agentDomPiiCount.textContent = latestSensitiveRegions ? latestSensitiveRegions.length : 0;
           if (agentOcrPiiCount) agentOcrPiiCount.textContent = latestOcrSensitiveRegions ? latestOcrSensitiveRegions.length : 0;
           if (agentSensitiveCount) agentSensitiveCount.textContent = latestMergedRegions ? latestMergedRegions.length : 0;
@@ -2025,7 +2884,33 @@ document.addEventListener("DOMContentLoaded", () => {
           if (previewDomCount) previewDomCount.textContent = `${latestVisualElements ? latestVisualElements.length : 0} elements`;
           if (previewSensitiveCount) previewSensitiveCount.textContent = String(latestMergedRegions ? latestMergedRegions.length : (latestSensitiveRegions ? latestSensitiveRegions.length : 0));
           if (previewRedactionStatus) previewRedactionStatus.textContent = (redactionResult && redactionResult.success) ? "ACTIVE" : "WITHHELD";
-          updatePipelineStage("PERCEPTION", "completed", `${latestVisualElements ? latestVisualElements.length : 0} DOM items`);
+          updatePipelineStage(
+            "PERCEPTION",
+            "completed",
+            perceptionDecision.canReuse ? `REUSED (${probeMs}ms)` : `${latestVisualElements ? latestVisualElements.length : 0} DOM items`
+          );
+
+          // Transition immediately to Stage 2: REASONING
+          updatePipelineStage("REASONING", "active", "Reasoning over visual context...");
+          setAgentState(AGENT_STATES.PLAN, `Reasoning step ${currentStep}...`);
+          const currentPlanBeforeReason = isPlannedTask && plannedSteps ? plannedSteps[currentStep - 1] : null;
+          updateCurrentActionCard({
+            stepText: isPlannedTask ? `STEP ${currentStep} / ${totalPlannedSteps}` : `STEP ${currentStep} / ${MAX_AGENT_STEPS}`,
+            action: currentPlanBeforeReason ? currentPlanBeforeReason.type : "REASON",
+            target: currentPlanBeforeReason ? (currentPlanBeforeReason.target || currentPlanBeforeReason.targetHint || currentPlanBeforeReason.fieldHint || "Page Elements") : "Page Elements",
+            value: currentPlanBeforeReason?.value || "",
+            grounding: "Reasoning in progress...",
+            risk: currentPlanBeforeReason?.risk || "LOW",
+            safety: "ANALYZING",
+            status: `Reasoning action for step ${currentStep}...`
+          });
+
+          if (visionPageChangeStatus) {
+            visionPageChangeStatus.textContent = perceptionDecision.canReuse
+              ? "STABLE (Reused)"
+              : (perceptionDecision.reason.includes("Initial") ? "INITIAL" : "FRESH");
+            visionPageChangeStatus.style.color = perceptionDecision.canReuse ? "#15803d" : "#1e40af";
+          }
 
           // Step 3: Verify M11/M12 redaction success (Fail-closed contract)
           if (!redactionResult || !redactionResult.success || !redactionResult.sanitizedScreenshotDataUrl) {
@@ -2199,27 +3084,62 @@ document.addEventListener("DOMContentLoaded", () => {
             );
             console.log("[SIH26171] Gateway response received");
           } catch (gwErr) {
-            console.warn("Visual gateway upload error, falling back to text-only pipeline:", gwErr);
-            if (agentSanitizedUploadStatus) {
-              agentSanitizedUploadStatus.textContent = "GATEWAY FAILED (Falling back to text-only)";
-              agentSanitizedUploadStatus.style.color = "#e65100";
-            }
-            if (agentReasoningText) {
-              agentReasoningText.textContent = `Visual gateway call failed (${gwErr.message}). Falling back to text-only sanitized pipeline.`;
-            }
+            console.warn("Visual gateway upload error, attempting local reasoning fallback:", gwErr);
+            if (currentStepPlan) {
+              console.log("[SIH26171] Gateway unavailable, falling back seamlessly to local deterministic reasoning plan");
+              if (agentSanitizedUploadStatus) {
+                agentSanitizedUploadStatus.textContent = "OFFLINE (Local Reasoning Fallback)";
+                agentSanitizedUploadStatus.style.color = "#e65100";
+              }
+              if (agentReasoningText) {
+                agentReasoningText.textContent = `Visual gateway unavailable (${gwErr.message}). Using on-device deterministic reasoning.`;
+              }
+              let localActionVal = (currentStepPlan.value !== undefined) ? currentStepPlan.value : null;
+              if (!localActionVal && localValuesMap && localValuesMap[currentStep - 1] !== undefined) {
+                localActionVal = localValuesMap[currentStep - 1];
+              }
+              gatewayResult = {
+                latencyMs: 0,
+                data: {
+                  provider: "Demo fallback",
+                  providerType: "gemini-fallback",
+                  fallbackUsed: true,
+                  fallbackReason: `Gateway unavailable (${gwErr.message}), fell back to local deterministic planner`,
+                  action: {
+                    action: currentStepPlan.type,
+                    target: currentStepPlan.target || currentStepPlan.targetHint || currentStepPlan.fieldHint || "target",
+                    targetLabel: currentStepPlan.targetHint || currentStepPlan.fieldHint || currentStepPlan.target || "target",
+                    fieldHint: currentStepPlan.fieldHint,
+                    value: localActionVal,
+                    amount: currentStepPlan.amount || null,
+                    requiresApproval: !!currentStepPlan.requiresApproval,
+                    groundingMethod: "planned-intent",
+                    groundingScore: 0
+                  }
+                }
+              };
+            } else {
+              if (agentSanitizedUploadStatus) {
+                agentSanitizedUploadStatus.textContent = "GATEWAY FAILED (Falling back to text-only)";
+                agentSanitizedUploadStatus.style.color = "#e65100";
+              }
+              if (agentReasoningText) {
+                agentReasoningText.textContent = `Visual gateway call failed (${gwErr.message}). Falling back to text-only sanitized pipeline.`;
+              }
 
-            await executeTextOnlyFallback(activeTab, pageData, "Gateway error fallback");
-            executionTraceHistory.push({
-              step: currentStep,
-              requestId,
-              action: null,
-              executed: false,
-              status: "fallback",
-              executionResult: `Gateway error: ${gwErr.message}`,
-              verification: "Fell back to text-only (/api/context)"
-            });
-            renderTraceHistory();
-            break;
+              await executeTextOnlyFallback(activeTab, pageData, "Gateway error fallback");
+              executionTraceHistory.push({
+                step: currentStep,
+                requestId,
+                action: null,
+                executed: false,
+                status: "fallback",
+                executionResult: `Gateway error: ${gwErr.message}`,
+                verification: "Fell back to text-only (/api/context)"
+              });
+              renderTraceHistory();
+              break;
+            }
           }
 
           // Step 7: Process Visual Gateway response
@@ -2319,7 +3239,9 @@ document.addEventListener("DOMContentLoaded", () => {
                 groundingMethod: "simultaneous-form-profile"
               };
             } else if (plannedType === "FILL") {
-              const isCompatibleFill = agentAction && agentAction.action === "FILL" && agentAction.targetIndex !== undefined;
+              const targetCandidate = agentAction ? (agentAction.targetLabel || agentAction.target || "") : "";
+              const matchesRequestedField = isFieldMatch(targetCandidate, currentStepPlan.fieldHint);
+              const isCompatibleFill = agentAction && agentAction.action === "FILL" && agentAction.targetIndex !== undefined && matchesRequestedField;
               // CRITICAL QUERY RULE: Authoritative explicit value extraction takes precedence
               let authoritativeVal = (currentStepPlan && currentStepPlan.value) ? currentStepPlan.value : null;
               if (!authoritativeVal && localValuesMap && localValuesMap[currentStep - 1] !== undefined) {
@@ -2349,10 +3271,14 @@ document.addEventListener("DOMContentLoaded", () => {
                 const fillCandidates = latestFusedElements || latestVisualElements || [];
                 fillCandidates.forEach((el, idx) => {
                   if (!FORM_TYPES.has((el.type || "").toLowerCase())) return;
-                  const labelNorm = normalize(el.label);
                   let score = 0;
-                  if (labelNorm === targetHintNorm) score = 1.0;
-                  else if (labelNorm.includes(targetHintNorm) || targetHintNorm.includes(labelNorm)) score = 0.8;
+                  if (isFieldMatch(el.label, currentStepPlan.fieldHint)) {
+                    score = 1.0;
+                  } else {
+                    const labelNorm = normalize(el.label);
+                    if (labelNorm === targetHintNorm) score = 1.0;
+                    else if (targetHintNorm.length >= 3 && (labelNorm.includes(targetHintNorm) || targetHintNorm.includes(labelNorm))) score = 0.8;
+                  }
                   if (score > 0 && el.isVisualConfirmed) {
                     score = Math.min(1.0, score + 0.10);
                   }
@@ -2384,10 +3310,14 @@ document.addEventListener("DOMContentLoaded", () => {
                     latestVisualElements = recoveryPage.visualElements;
                     (latestVisualElements || []).forEach((el, idx) => {
                       if (!FORM_TYPES.has((el.type || "").toLowerCase())) return;
-                      const labelNorm = normalize(el.label);
                       let score = 0;
-                      if (labelNorm === targetHintNorm) score = 1.0;
-                      else if (labelNorm.includes(targetHintNorm) || targetHintNorm.includes(labelNorm)) score = 0.8;
+                      if (isFieldMatch(el.label, currentStepPlan.fieldHint)) {
+                        score = 1.0;
+                      } else {
+                        const labelNorm = normalize(el.label);
+                        if (labelNorm === targetHintNorm) score = 1.0;
+                        else if (targetHintNorm.length >= 3 && (labelNorm.includes(targetHintNorm) || targetHintNorm.includes(labelNorm))) score = 0.8;
+                      }
                       if (score > bestScore) {
                         bestScore = score;
                         bestIdx = idx;
@@ -2475,12 +3405,13 @@ document.addEventListener("DOMContentLoaded", () => {
               if (!isCompatibleClick || agentAction.targetIndex === undefined) {
                 const normalize = (s) => (s || "").trim().toLowerCase();
                 const rawHint = normalize(currentStepPlan.targetHint || currentStepPlan.legacyTarget || agentAction?.target || "").replace(/_button|_input/, "").trim();
-                const cleanHint = rawHint.replace(/\s+(?:box|input|field|area|button|link)$/i, "").trim();
+                const cleanHint = rawHint.replace(/\s+(?:box|input|field|area|button|link|section|tab|panel|container|header|heading|option|checkbox)$/i, "").trim();
 
                 const computeClickScore = (el) => {
                   if (el.disabled || String(el["aria-disabled"]).toLowerCase() === "true") return 0;
                   const elType = (el.type || "").toLowerCase();
-                  if (!["button", "link", "input", "element"].includes(elType)) return 0;
+                  const ALLOWED_CLICK_TYPES = ["button", "link", "input", "element", "heading", "tab", "menuitem", "option", "checkbox", "radio", "switch", "select", "section"];
+                  if (!ALLOWED_CLICK_TYPES.includes(elType)) return 0;
                   const labelNorm = normalize(el.label);
 
                   // STRICT TARGET VALIDATION: If user specified an explicit named target, verify strictly against it
@@ -2614,28 +3545,115 @@ document.addEventListener("DOMContentLoaded", () => {
                     }
                   }
 
-                  if (!agentAction || agentAction.action !== "CLICK") {
-                    if (isExplicitTarget) {
-                      agentAction = {
-                        action: "NONE",
-                        target: null,
-                        reason: `Target not found: ${currentStepPlan.explicitTarget || currentStepPlan.targetHint}`
-                      };
-                    } else if (currentStepPlan.legacyTarget) {
+                  if (bestIdx < 0 || bestScore < 0.35) {
+                    const missingTargetLabel = currentStepPlan.explicitTarget || currentStepPlan.targetHint || currentStepPlan.target || rawHint;
+                    let legacyFoundIdx = -1;
+                    if (currentStepPlan.legacyTarget && !isExplicitTarget) {
+                      const legCand = clickCandidates.findIndex((el) => el.semanticTag === currentStepPlan.legacyTarget || (el.label && el.label.toLowerCase().includes(currentStepPlan.legacyTarget.toLowerCase())));
+                      if (legCand >= 0) legacyFoundIdx = legCand;
+                    }
+                    if (legacyFoundIdx >= 0) {
+                      const matchedEl = clickCandidates[legacyFoundIdx];
                       agentAction = {
                         action: "CLICK",
-                        target: currentStepPlan.legacyTarget,
+                        target: matchedEl.label,
+                        targetIndex: matchedEl.index !== undefined ? matchedEl.index : legacyFoundIdx,
+                        targetType: matchedEl.type,
+                        targetLabel: matchedEl.label,
+                        groundingScore: 0.8,
                         groundingMethod: "keyword-rule"
                       };
                     } else {
                       agentAction = {
                         action: "NONE",
                         target: null,
-                        reason: `Could not safely ground click target '${currentStepPlan.targetHint}' on DOM.`
+                        targetLabel: missingTargetLabel,
+                        groundingScore: 0,
+                        groundingMethod: "target-not-found",
+                        reason: `Target not found on current page: '${missingTargetLabel}'`
                       };
                     }
                   }
                 }
+              }
+            } else if (["CHECK", "UNCHECK", "SELECT", "TOGGLE"].includes(plannedType)) {
+              const targetRaw = (currentStepPlan.targetHint || currentStepPlan.target || "").trim();
+              const targetNorm = targetRaw.toLowerCase().replace(/[:*#_\-\/\\]+/g, " ").replace(/\s+(?:box|checkbox|option|button|link|switch|radio)$/i, "").trim();
+              const actionCandidates = latestFusedElements || latestVisualElements || [];
+
+              // If context is specified, verify context exists on page perception
+              let contextValid = true;
+              if (currentStepPlan.context) {
+                const ctxNorm = (currentStepPlan.context || "").toLowerCase().trim();
+                const ctxFound = actionCandidates.some(el => {
+                  const lbl = (el.label || "").toLowerCase();
+                  return lbl.includes(ctxNorm) || ctxNorm.includes(lbl);
+                });
+                if (!ctxFound) {
+                  contextValid = false;
+                }
+              }
+
+              let matchedCandidate = null;
+              let matchedCandIdx = -1;
+
+              if (contextValid) {
+                // Find candidates matching targetNorm
+                const matches = [];
+                actionCandidates.forEach((el, idx) => {
+                  if (el.disabled || String(el["aria-disabled"]).toLowerCase() === "true") return;
+                  const lblNorm = (el.label || "").toLowerCase().replace(/[:*#_\-\/\\]+/g, " ").trim();
+                  const elType = (el.type || "").toLowerCase();
+
+                  // Type compatibility check
+                  let typeBonus = 0;
+                  if (["CHECK", "UNCHECK"].includes(plannedType) && (elType === "checkbox" || el.semanticTag === "CHECKBOX")) typeBonus = 0.2;
+                  if (plannedType === "SELECT" && (elType === "option" || elType === "button" || elType === "radio" || elType === "link" || elType === "element")) typeBonus = 0.1;
+                  if (plannedType === "TOGGLE" && (elType === "switch" || elType === "checkbox" || elType === "button")) typeBonus = 0.2;
+
+                  if (lblNorm === targetNorm || lblNorm.includes(targetNorm) || targetNorm.includes(lblNorm)) {
+                    const exact = (lblNorm === targetNorm) ? 1.0 : 0.85;
+                    matches.push({ el, idx, score: exact + typeBonus });
+                  }
+                });
+
+                if (matches.length > 0) {
+                  matches.sort((a, b) => b.score - a.score);
+                  if (typeof currentStepPlan.ordinal === "number" && currentStepPlan.ordinal >= 1 && currentStepPlan.ordinal <= matches.length) {
+                    matchedCandidate = matches[currentStepPlan.ordinal - 1].el;
+                    matchedCandIdx = matches[currentStepPlan.ordinal - 1].idx;
+                  } else {
+                    matchedCandidate = matches[0].el;
+                    matchedCandIdx = matches[0].idx;
+                  }
+                }
+              }
+
+              if (matchedCandidate && matchedCandIdx >= 0) {
+                agentAction = {
+                  action: plannedType,
+                  target: matchedCandidate.label,
+                  targetIndex: matchedCandidate.index !== undefined ? matchedCandidate.index : matchedCandIdx,
+                  targetType: matchedCandidate.type || currentStepPlan.targetType || "element",
+                  targetLabel: matchedCandidate.label,
+                  context: currentStepPlan.context || null,
+                  relation: currentStepPlan.relation || null,
+                  ordinal: currentStepPlan.ordinal !== undefined ? currentStepPlan.ordinal : null,
+                  groundingScore: 1.0,
+                  groundingMethod: currentStepPlan.context ? "contextual-rule" : "local-element-match"
+                };
+              } else {
+                // GROUNDING FAILED: Candidate does not exist in current perception
+                agentAction = {
+                  action: "NONE",
+                  target: null,
+                  targetLabel: targetRaw,
+                  groundingScore: 0,
+                  groundingMethod: "target-not-found",
+                  reason: !contextValid
+                    ? `Context '${currentStepPlan.context}' not found on current page.`
+                    : `Target '${targetRaw}' not found in current page perception.`
+                };
               }
             } else if (plannedType === "SCROLL") {
               if (!agentAction || agentAction.action !== "SCROLL") {
@@ -2701,21 +3719,37 @@ document.addEventListener("DOMContentLoaded", () => {
             ? { x: groundedVisualEl.x, y: groundedVisualEl.y, width: groundedVisualEl.width, height: groundedVisualEl.height }
             : null;
 
+          const isGrounded = !!(
+            agentAction &&
+            agentAction.action !== "NONE" &&
+            (agentAction.targetIndex !== undefined || (agentAction.target && agentAction.groundingScore > 0))
+          );
+          const actualScore = isGrounded
+            ? (agentAction.groundingScore !== undefined ? agentAction.groundingScore : 0.8)
+            : 0.0;
+          const displayTarget = agentAction?.targetLabel || agentAction?.target || targetStr;
+
           updateGroundingInspection({
-            element: agentAction?.targetLabel || agentAction?.target || targetStr,
+            element: isGrounded ? displayTarget : (displayTarget || "None"),
             role: agentAction?.targetType || (groundedVisualEl?.type || "element"),
             type: groundedVisualEl?.type || (agentAction?.targetType || "element"),
             index: agentAction?.targetIndex,
-            score: agentAction?.groundingScore !== undefined ? agentAction.groundingScore : 1.0,
-            method: agentAction?.groundingMethod || (agentAction?.targetIndex !== undefined ? "local-fuzzy-match" : "keyword-rule"),
-            bbox,
-            reason: data.reasoning || (isGeminiSuccess ? "Gemini proposed action grounded to verified DOM element" : "Local perception grounded action to DOM element")
+            score: isGrounded ? actualScore : 0.0,
+            method: isGrounded ? (agentAction?.groundingMethod || (agentAction?.targetIndex !== undefined ? "local-fuzzy-match" : "keyword-rule")) : "target-not-found",
+            bbox: isGrounded ? bbox : null,
+            reason: isGrounded
+              ? (data.reasoning || (isGeminiSuccess ? "Gemini proposed action grounded to verified DOM element" : "Local perception grounded action to DOM element"))
+              : (agentAction?.reason || `Target '${displayTarget}' not found in current page perception.`)
           });
 
-          drawBoundingBoxOnPreview(bbox, agentAction?.targetLabel || agentAction?.target);
+          if (isGrounded) {
+            drawBoundingBoxOnPreview(bbox, displayTarget);
+          } else {
+            clearBoundingBoxOnPreview();
+          }
 
           // Milestone 18: Live Explainable Agent Overlay (Grounded Target on active webpage)
-          if (agentAction && agentAction.action !== "NONE") {
+          if (isGrounded && agentAction && agentAction.action !== "NONE") {
             sendOverlayTelemetry(activeTab?.id, {
               action: "showAgentOverlay",
               payload: {
@@ -2725,25 +3759,38 @@ document.addEventListener("DOMContentLoaded", () => {
                 targetLabel: agentAction.targetLabel,
                 targetIndex: agentAction.targetIndex,
                 targetType: agentAction.targetType,
-                confidence: agentAction.groundingScore !== undefined ? agentAction.groundingScore : 1.0,
+                confidence: actualScore,
                 method: agentAction.groundingMethod || (agentAction.targetIndex !== undefined ? "local-fuzzy-match" : "keyword-rule"),
                 bbox
               }
             });
           }
 
-          updatePipelineStage("GROUNDING", "completed", `${agentAction?.targetLabel || agentAction?.target || "Grounded"} (${agentAction?.groundingScore !== undefined ? agentAction.groundingScore : "1.0"})`);
-
-          updateCurrentActionCard({
-            stepText: isPlannedTask ? `STEP ${currentStep} / ${totalPlannedSteps}` : `STEP ${currentStep} / ${MAX_AGENT_STEPS}`,
-            action: agentAction?.action,
-            target: agentAction?.targetLabel || agentAction?.target || targetStr,
-            value: agentAction?.value || "",
-            grounding: `${agentAction?.targetLabel || agentAction?.target || "Grounded"} (Score: ${agentAction?.groundingScore !== undefined ? agentAction.groundingScore : "1.00"})`,
-            risk: "LOW",
-            safety: "CHECKING...",
-            status: "Evaluating safety gate..."
-          });
+          if (isGrounded) {
+            updatePipelineStage("GROUNDING", "completed", `${displayTarget} (${Number(actualScore).toFixed(2)})`);
+            updateCurrentActionCard({
+              stepText: isPlannedTask ? `STEP ${currentStep} / ${totalPlannedSteps}` : `STEP ${currentStep} / ${MAX_AGENT_STEPS}`,
+              action: agentAction?.action,
+              target: displayTarget,
+              value: agentAction?.value || "",
+              grounding: `${displayTarget} (Score: ${Number(actualScore).toFixed(2)})`,
+              risk: agentAction?.risk || "LOW",
+              safety: "CHECKING...",
+              status: "Evaluating safety gate..."
+            });
+          } else {
+            updatePipelineStage("GROUNDING", "failed", `Target not found: ${displayTarget}`);
+            updateCurrentActionCard({
+              stepText: isPlannedTask ? `STEP ${currentStep} / ${totalPlannedSteps}` : `STEP ${currentStep} / ${MAX_AGENT_STEPS}`,
+              action: "NONE",
+              target: displayTarget,
+              value: "",
+              grounding: `Target not found (Score: 0.00)`,
+              risk: "LOW",
+              safety: "BLOCKED",
+              status: `Target not found on current page: '${displayTarget}'`
+            });
+          }
 
           const stepIdentifier = currentStepPlan ? `step_${currentStep - 1}:${currentStepPlan.type}:${currentStepPlan.fieldHint || currentStepPlan.targetHint || ""}` : `step_${currentStep}`;
           const actionTargetIdentifier = agentAction?.target || (agentAction?.targetIndex !== undefined ? `#${agentAction.targetIndex}:${agentAction.targetType}:${agentAction.targetLabel}` : "");
@@ -2758,6 +3805,7 @@ document.addEventListener("DOMContentLoaded", () => {
             if (agentExecutionStatus) agentExecutionStatus.textContent = "Halted: No further meaningful action possible";
             executionTraceHistory.push({
               step: currentStep,
+              totalSteps: isPlannedTask ? totalPlannedSteps : MAX_AGENT_STEPS,
               requestId,
               action: agentAction,
               executed: false,
@@ -2813,25 +3861,23 @@ document.addEventListener("DOMContentLoaded", () => {
 
             // If still NONE or no target, terminate safely without falsely claiming completion
             if (!agentAction || agentAction.action === "NONE" || (!agentAction.target && agentAction.targetIndex === undefined)) {
-              const targetName = currentStepPlan?.explicitTarget || currentStepPlan?.targetHint || currentStepPlan?.fieldHint || "element";
+              const targetName = agentAction?.targetLabel || currentStepPlan?.explicitTarget || currentStepPlan?.targetHint || currentStepPlan?.fieldHint || currentStepPlan?.target || "element";
               const isExplicit = !!(currentStepPlan?.isExplicitTarget);
 
-              if (isExplicit) {
-                if (agentSafetyStatus) agentSafetyStatus.textContent = "TARGET NOT FOUND / ACTION BLOCKED";
-                if (agentExecutionStatus) agentExecutionStatus.textContent = `Target not found: ${targetName}`;
-                if (executionOutput) executionOutput.value = `Target not found: ${targetName}`;
+              if (isExplicit || (isPlannedTask && currentStepPlan && currentStepPlan.type !== "NONE")) {
+                if (agentSafetyStatus) agentSafetyStatus.textContent = "BLOCKED (Target not found in perception)";
+                if (agentExecutionStatus) agentExecutionStatus.textContent = `TARGET NOT FOUND: '${targetName}'`;
+                if (executionOutput) executionOutput.value = `TARGET NOT FOUND: Target '${targetName}' does not exist in current page perception.`;
                 if (agentVerificationText) {
-                  agentVerificationText.textContent = `Verification: Explicit target '${targetName}' not found on page.`;
+                  agentVerificationText.textContent = `Verification: Target '${targetName}' not found in current page perception.`;
                   agentVerificationText.style.color = "#c62828";
                 }
-              } else if (isPlannedTask && currentStepPlan && currentStepPlan.type !== "NONE") {
-                if (agentSafetyStatus) agentSafetyStatus.textContent = "HALTED (Target not found on page)";
-                if (agentExecutionStatus) agentExecutionStatus.textContent = `Halted at step ${currentStep} of ${totalPlannedSteps}: Target '${targetName}' not visible`;
-                if (executionOutput) executionOutput.value = `Halted at step ${currentStep}: Target not visible`;
-                if (agentVerificationText) {
-                  agentVerificationText.textContent = `Verification: Target not visible on current page.`;
-                  agentVerificationText.style.color = "#c62828";
-                }
+                updatePipelineStage("SAFETY", "failed", "Blocked (Missing Target)");
+                updatePipelineStage("EXECUTION", "pending", "Skipped");
+                updatePipelineStage("VERIFICATION", "failed", "Target Not Found");
+                appendPlannerTrace(`Grounding FAILED: Target '${targetName}' not found in current perception.`);
+                appendPlannerTrace("Safety Gate: Execution BLOCKED due to ungrounded target.");
+                appendPlannerTrace("Loop halted cleanly without execution.");
               } else {
                 if (agentSafetyStatus) agentSafetyStatus.textContent = "PASSED (No-op action safely handled)";
                 if (agentExecutionStatus) agentExecutionStatus.textContent = "Task complete (No further action needed)";
@@ -2844,12 +3890,13 @@ document.addEventListener("DOMContentLoaded", () => {
 
               executionTraceHistory.push({
                 step: currentStep,
+                totalSteps: isPlannedTask ? totalPlannedSteps : MAX_AGENT_STEPS,
                 requestId,
                 action: agentAction,
                 executed: false,
-                status: isExplicit ? "blocked" : (isPlannedTask ? "unresolved" : "completed"),
-                executionResult: isExplicit ? `Target not found: ${targetName}` : (isPlannedTask ? `Halted: Target '${targetName}' not visible on page` : "Skipped (Action is NONE)"),
-                verification: isExplicit ? "TARGET NOT FOUND / ACTION BLOCKED" : (isPlannedTask ? "Step unresolved" : "Goal completed")
+                status: (isExplicit || isPlannedTask) ? "blocked" : "completed",
+                executionResult: (isExplicit || isPlannedTask) ? `TARGET NOT FOUND: Target '${targetName}' not found in current page perception` : "Skipped (Action is NONE)",
+                verification: (isExplicit || isPlannedTask) ? "TARGET NOT FOUND / ACTION BLOCKED" : "Goal completed"
               });
               renderTraceHistory();
               break;
@@ -2875,20 +3922,9 @@ document.addEventListener("DOMContentLoaded", () => {
             if (currentStepPlan && currentStepPlan.type === "FILL") {
               const hintNorm = (currentStepPlan.fieldHint || "").toLowerCase().replace(/[:*_\-\/\\]+/g, " ").trim();
               const targetNorm = (agentAction.targetLabel || "").toLowerCase().replace(/[:*_\-\/\\]+/g, " ").trim();
-              const hintTokens = new Set(hintNorm.split(/\s+/).filter(Boolean));
-              const targetTokens = new Set(targetNorm.split(/\s+/).filter(Boolean));
-              let sharesToken = false;
-              for (const ht of hintTokens) {
-                if (targetTokens.has(ht)) { sharesToken = true; break; }
-              }
-              const isSynonym = (hintNorm === "name" && targetNorm.includes("name")) ||
-                (hintNorm.includes("name") && targetNorm.includes("name")) ||
-                (hintNorm.includes("email") && targetNorm.includes("email")) ||
-                (hintNorm.includes("address") && targetNorm.includes("address")) ||
-                (hintNorm.includes("phone") && targetNorm.includes("phone")) ||
-                (hintNorm.includes("city") && targetNorm.includes("city"));
+              const matchesField = isFieldMatch(targetNorm, hintNorm);
 
-              if (!sharesToken && !isSynonym && !targetNorm.includes(hintNorm) && !hintNorm.includes(targetNorm)) {
+              if (!matchesField) {
                 if (agentSafetyStatus) agentSafetyStatus.textContent = "SAFETY REJECT: Target Mismatch";
                 if (agentExecutionStatus) agentExecutionStatus.textContent = `Halted: Grounded '${agentAction.targetLabel}' does not match requested field '${currentStepPlan.fieldHint}'`;
                 // Milestone 18: Live Explainable Agent Overlay (Safety Blocked)
@@ -2903,6 +3939,7 @@ document.addEventListener("DOMContentLoaded", () => {
                 });
                 executionTraceHistory.push({
                   step: currentStep,
+                  totalSteps: isPlannedTask ? totalPlannedSteps : MAX_AGENT_STEPS,
                   requestId,
                   action: agentAction,
                   executed: false,
@@ -3014,15 +4051,35 @@ document.addEventListener("DOMContentLoaded", () => {
               target: agentAction.target || "search",
               query: currentStepPlan ? currentStepPlan.query : null
             };
+          } else if (["CHECK", "UNCHECK", "SELECT", "TOGGLE"].includes(agentAction.action) || (currentStepPlan && ["CHECK", "UNCHECK", "SELECT", "TOGGLE"].includes(currentStepPlan.type))) {
+            const act = agentAction.action || currentStepPlan.type;
+            executionPayload = {
+              action: act,
+              target: agentAction.target || (currentStepPlan ? currentStepPlan.target : null),
+              targetLabel: agentAction.targetLabel || agentAction.target || (currentStepPlan ? currentStepPlan.target : null),
+              targetType: agentAction.targetType || (currentStepPlan ? currentStepPlan.targetType : null),
+              targetIndex: agentAction.targetIndex,
+              context: agentAction.context || (currentStepPlan ? currentStepPlan.context : null),
+              relation: agentAction.relation || (currentStepPlan ? currentStepPlan.relation : null),
+              ordinal: agentAction.ordinal !== undefined ? agentAction.ordinal : (currentStepPlan ? currentStepPlan.ordinal : null)
+            };
           } else if (agentAction.targetIndex !== undefined) {
             executionPayload = {
               action: "CLICK",
               targetIndex: agentAction.targetIndex,
               targetType: agentAction.targetType,
-              targetLabel: agentAction.targetLabel
+              targetLabel: agentAction.targetLabel,
+              context: agentAction.context || (currentStepPlan ? currentStepPlan.context : null),
+              relation: agentAction.relation || (currentStepPlan ? currentStepPlan.relation : null),
+              ordinal: agentAction.ordinal !== undefined ? agentAction.ordinal : (currentStepPlan ? currentStepPlan.ordinal : null)
             };
           } else {
-            executionPayload = agentAction;
+            executionPayload = {
+              ...agentAction,
+              context: agentAction.context || (currentStepPlan ? currentStepPlan.context : null),
+              relation: agentAction.relation || (currentStepPlan ? currentStepPlan.relation : null),
+              ordinal: agentAction.ordinal !== undefined ? agentAction.ordinal : (currentStepPlan ? currentStepPlan.ordinal : null)
+            };
           }
 
           // =====================================================================
@@ -3193,6 +4250,7 @@ document.addEventListener("DOMContentLoaded", () => {
               }
               executionTraceHistory.push({
                 step: currentStep,
+                totalSteps: isPlannedTask ? totalPlannedSteps : MAX_AGENT_STEPS,
                 requestId,
                 action: agentAction,
                 executed: false,
@@ -3248,6 +4306,7 @@ document.addEventListener("DOMContentLoaded", () => {
               if (agentExecutionStatus) agentExecutionStatus.textContent = "Target moved or disappeared after approval. Halted.";
               executionTraceHistory.push({
                 step: currentStep,
+                totalSteps: isPlannedTask ? totalPlannedSteps : MAX_AGENT_STEPS,
                 requestId,
                 action: agentAction,
                 executed: false,
@@ -3280,6 +4339,7 @@ document.addEventListener("DOMContentLoaded", () => {
                 if (agentExecutionStatus) agentExecutionStatus.textContent = `Halted: ${recheckGate.reason}`;
                 executionTraceHistory.push({
                   step: currentStep,
+                  totalSteps: isPlannedTask ? totalPlannedSteps : MAX_AGENT_STEPS,
                   requestId,
                   action: agentAction,
                   executed: false,
@@ -3308,6 +4368,7 @@ document.addEventListener("DOMContentLoaded", () => {
             if (agentExecutionStatus) agentExecutionStatus.textContent = `Halted by Safety Gate: ${safetyGate.reason}`;
             executionTraceHistory.push({
               step: currentStep,
+              totalSteps: isPlannedTask ? totalPlannedSteps : MAX_AGENT_STEPS,
               requestId,
               action: agentAction,
               executed: false,
@@ -3431,36 +4492,109 @@ document.addEventListener("DOMContentLoaded", () => {
               };
             }
 
-            const verificationResultStr = `${m21Verification.status}: ${m21Verification.reason}`;
-            if (agentVerificationText) {
-              agentVerificationText.textContent = verificationResultStr;
-              agentVerificationText.style.color = "#dc2626";
+            // Milestone 21.3: Controlled Recovery after Action Failure
+            if (!recoveryAttempted) {
+              recoveryAttempted = true;
+              const recoveryOutcome = await attemptControlledRecovery({
+                currentStep,
+                totalSteps: isPlannedTask ? totalPlannedSteps : MAX_AGENT_STEPS,
+                activeTab,
+                originalAction: agentAction,
+                currentStepPlan,
+                initialFailureReason: m21Verification.reason,
+                requestId
+              });
+
+              if (recoveryOutcome && recoveryOutcome.result === "VERIFIED") {
+                actionExecutedSuccessfully = true;
+                if (recoveryOutcome.agentAction) {
+                  agentAction = recoveryOutcome.agentAction;
+                }
+                m21Verification = recoveryOutcome.verificationDetails || {
+                  status: "VERIFIED",
+                  verified: true,
+                  actionType: agentAction.action,
+                  reason: recoveryOutcome.reason
+                };
+                stepRecoveryNote = `Controlled recovery verified: ${recoveryOutcome.reason}`;
+                actionExecutionSummary = `Recovery executed: ${agentAction.action} → ${agentAction.targetLabel || agentAction.target}`;
+                if (agentExecutionStatus) agentExecutionStatus.textContent = actionExecutionSummary;
+                if (agentVerificationText) {
+                  agentVerificationText.textContent = `VERIFIED: ${m21Verification.reason}`;
+                  agentVerificationText.style.color = "#2e7d32";
+                }
+                if (window.SIHEvaluationTracker) window.SIHEvaluationTracker.recordRecovery(stepRecoveryNote);
+              } else {
+                const verificationResultStr = `${recoveryOutcome.result}: ${recoveryOutcome.reason}`;
+                if (agentVerificationText) {
+                  agentVerificationText.textContent = verificationResultStr;
+                  agentVerificationText.style.color = "#dc2626";
+                }
+                if (agentExecutionStatus) {
+                  agentExecutionStatus.textContent = `Action failed safely: ${recoveryOutcome.reason}`;
+                }
+                updatePipelineStage("EXECUTION", "failed", "Execution failed ✗");
+                updatePipelineStage("VERIFICATION", "failed", "Verification failed ✗");
+
+                executionTraceHistory.push({
+                  step: currentStep,
+                  totalSteps: isPlannedTask ? totalPlannedSteps : MAX_AGENT_STEPS,
+                  requestId,
+                  agentState: "FAILED",
+                  action: agentAction,
+                  executed: false,
+                  status: "recovery_failed",
+                  perception: (latestVisualElements && latestVisualElements.length > 0)
+                    ? `${latestVisualElements.length} visual elements perceived locally`
+                    : "DOM perception active",
+                  groundingStr: `Label='${agentAction.targetLabel || agentAction.target || "none"}', Role=${agentAction.targetType || "element"}`,
+                  risk: safetyGate.risk || "LOW",
+                  safetyDecision: safetyGate.allowed ? "ALLOWED" : "BLOCKED",
+                  humanApproval: safetyGate.requiresApproval ? "GRANTED" : "NOT REQUIRED",
+                  executionResult: `Execution failed: ${recoveryOutcome.reason}`,
+                  verification: verificationResultStr,
+                  verificationDetails: m21Verification,
+                  recovery: recoveryOutcome
+                });
+                renderTraceHistory();
+                break;
+              }
+            } else {
+              console.log("[M21][RECOVERY] recovery limit reached");
+              appendPlannerTrace(`Step ${currentStep}: Recovery limit reached (max 1 attempt). Halting execution safely.`);
+              const verificationResultStr = `${m21Verification.status}: ${m21Verification.reason}`;
+              if (agentVerificationText) {
+                agentVerificationText.textContent = verificationResultStr;
+                agentVerificationText.style.color = "#dc2626";
+              }
+              if (agentExecutionStatus) {
+                agentExecutionStatus.textContent = `Halted: ${actionExecutionSummary}`;
+              }
+              updatePipelineStage("EXECUTION", "failed", "Execution failed ✗");
+              updatePipelineStage("VERIFICATION", "failed", "Verification failed ✗");
+
+              executionTraceHistory.push({
+                step: currentStep,
+                totalSteps: isPlannedTask ? totalPlannedSteps : MAX_AGENT_STEPS,
+                requestId,
+                agentState: "FAILED",
+                action: agentAction,
+                executed: false,
+                status: "rejected",
+                perception: (latestVisualElements && latestVisualElements.length > 0)
+                  ? `${latestVisualElements.length} visual elements perceived locally`
+                  : "DOM perception active",
+                groundingStr: `Label='${agentAction.targetLabel || agentAction.target || "none"}', Role=${agentAction.targetType || "element"}`,
+                risk: safetyGate.risk || "LOW",
+                safetyDecision: safetyGate.allowed ? "ALLOWED" : "BLOCKED",
+                humanApproval: safetyGate.requiresApproval ? "GRANTED" : "NOT REQUIRED",
+                executionResult: actionExecutionSummary,
+                verification: verificationResultStr,
+                verificationDetails: m21Verification
+              });
+              renderTraceHistory();
+              break;
             }
-
-            updatePipelineStage("EXECUTION", "failed", "Execution failed ✗");
-            updatePipelineStage("VERIFICATION", "failed", "Verification failed ✗");
-
-            executionTraceHistory.push({
-              step: currentStep,
-              totalSteps: isPlannedTask ? totalPlannedSteps : MAX_AGENT_STEPS,
-              requestId,
-              agentState: "FAILED",
-              action: agentAction,
-              executed: false,
-              status: "rejected",
-              perception: (latestVisualElements && latestVisualElements.length > 0)
-                ? `${latestVisualElements.length} visual elements perceived locally`
-                : "DOM perception active",
-              groundingStr: `Label='${agentAction.targetLabel || agentAction.target || "none"}', Role=${agentAction.targetType || "element"}`,
-              risk: safetyGate.risk || "LOW",
-              safetyDecision: safetyGate.allowed ? "ALLOWED" : "BLOCKED",
-              humanApproval: safetyGate.requiresApproval ? "GRANTED" : "NOT REQUIRED",
-              executionResult: actionExecutionSummary,
-              verification: verificationResultStr,
-              verificationDetails: m21Verification
-            });
-            renderTraceHistory();
-            break;
           }
 
           if (agentSafetyStatus) agentSafetyStatus.textContent = "PASSED (Allowlist Verified)";
@@ -3610,6 +4744,15 @@ document.addEventListener("DOMContentLoaded", () => {
           }
 
           // Record evaluation metrics (Section 23)
+          lastStepVerification = m21Verification;
+          lastExecutedActionType = agentAction ? agentAction.action : null;
+          if (postPageData && window.SIHChangeDetector && typeof window.SIHChangeDetector.computeLightweightDomSignature === "function") {
+            cachedLightweightSignature = window.SIHChangeDetector.computeLightweightDomSignature(
+              updatedDom || [],
+              { url: postPageData.url, title: postPageData.title, viewport: postPageData.viewport }
+            );
+          }
+
           if (window.SIHEvaluationTracker) {
             window.SIHEvaluationTracker.recordAction({
               action: agentAction.action,
@@ -3660,9 +4803,13 @@ document.addEventListener("DOMContentLoaded", () => {
             action: agentAction,
             executed: true,
             status: m21Verification.status === "FAILED" ? "verification_failed" : "success",
-            perception: (latestVisualElements && latestVisualElements.length > 0)
-              ? `${latestVisualElements.length} visual elements perceived locally`
-              : "DOM perception active",
+            perception: lastPerceptionDecision.reused
+              ? `Reused stable perception (${lastPerceptionDecision.probeMs}ms)`
+              : ((latestVisualElements && latestVisualElements.length > 0)
+                ? `${latestVisualElements.length} visual elements perceived locally`
+                : "DOM perception active"),
+            perceptionDecision: lastPerceptionDecision.reason,
+            adaptivePerceptionReused: lastPerceptionDecision.reused,
             groundingStr: `Label='${agentAction.targetLabel || agentAction.target || "none"}', Role=${agentAction.targetType || "element"}, Conf=${agentAction.groundingScore !== undefined ? agentAction.groundingScore : 1.0}`,
             risk: safetyGate.risk || "LOW",
             safetyDecision: safetyGate.allowed ? (safetyGate.requiresApproval ? "APPROVED" : "ALLOWED") : "BLOCKED",
@@ -3674,13 +4821,85 @@ document.addEventListener("DOMContentLoaded", () => {
           });
           renderTraceHistory();
 
-          // Milestone 21.1: If verification explicitly failed, halt without blindly continuing
+          // Milestone 21.1 / 21.3: If verification explicitly failed, attempt controlled recovery once
           if (m21Verification.status === "FAILED") {
-            appendPlannerTrace(`Step ${currentStep} verification failed: ${m21Verification.reason}. Halting execution.`);
-            if (agentExecutionStatus) {
-              agentExecutionStatus.textContent = `Halted: Step ${currentStep} verification failed (${m21Verification.reason})`;
+            if (!recoveryAttempted) {
+              recoveryAttempted = true;
+              const recoveryOutcome = await attemptControlledRecovery({
+                currentStep,
+                totalSteps: isPlannedTask ? totalPlannedSteps : MAX_AGENT_STEPS,
+                activeTab,
+                originalAction: agentAction,
+                currentStepPlan,
+                initialFailureReason: m21Verification.reason,
+                requestId
+              });
+
+              if (recoveryOutcome && recoveryOutcome.result === "VERIFIED") {
+                actionExecutedSuccessfully = true;
+                if (recoveryOutcome.agentAction) {
+                  agentAction = recoveryOutcome.agentAction;
+                }
+                m21Verification = recoveryOutcome.verificationDetails || {
+                  status: "VERIFIED",
+                  verified: true,
+                  actionType: agentAction.action,
+                  reason: recoveryOutcome.reason
+                };
+                stepRecoveryNote = `Controlled recovery verified: ${recoveryOutcome.reason}`;
+                if (window.SIHEvaluationTracker) window.SIHEvaluationTracker.recordRecovery(stepRecoveryNote);
+
+                // Update the last history trace entry with verified recovery
+                if (executionTraceHistory.length > 0) {
+                  const lastTrace = executionTraceHistory[executionTraceHistory.length - 1];
+                  lastTrace.recovery = recoveryOutcome;
+                  lastTrace.status = "success";
+                  lastTrace.verification = `VERIFIED: ${m21Verification.reason}`;
+                  lastTrace.verificationDetails = m21Verification;
+                  renderTraceHistory();
+                }
+
+                // Update step/goal completion
+                if (stepPlanForCheck) {
+                  stepPlanForCheck.completed = true;
+                  stepPlanForCheck.verified = true;
+                }
+                if (plannedSteps && plannedSteps[currentStep - 1]) {
+                  plannedSteps[currentStep - 1].completed = true;
+                  plannedSteps[currentStep - 1].verified = true;
+                }
+                if (stepPlanForCheck && stepPlanForCheck.goalId && Array.isArray(taskGoals)) {
+                  const currentGoal = taskGoals.find((g) => g.id === stepPlanForCheck.goalId);
+                  if (currentGoal) {
+                    const goalSteps = (reasoningPlan?.steps || plannedSteps || []).filter((s) => s.goalId === currentGoal.id);
+                    const allGoalStepsDone = goalSteps.length === 0 || goalSteps.every((s) => s.completed || s.verified);
+                    if (allGoalStepsDone && !currentGoal.completed) {
+                      currentGoal.completed = true;
+                      if (!completedGoals.includes(currentGoal.id)) completedGoals.push(currentGoal.id);
+                      remainingGoals = taskGoals.filter((g) => !completedGoals.includes(g.id));
+                    }
+                  }
+                }
+              } else {
+                appendPlannerTrace(`Step ${currentStep} verification failed after recovery: ${recoveryOutcome.reason}. Halting execution.`);
+                if (agentExecutionStatus) {
+                  agentExecutionStatus.textContent = `Halted: Step ${currentStep} recovery failed (${recoveryOutcome.reason})`;
+                }
+                if (executionTraceHistory.length > 0) {
+                  executionTraceHistory[executionTraceHistory.length - 1].recovery = recoveryOutcome;
+                  executionTraceHistory[executionTraceHistory.length - 1].status = "recovery_failed";
+                  renderTraceHistory();
+                }
+                break;
+              }
+            } else {
+              console.log("[M21][RECOVERY] recovery limit reached");
+              appendPlannerTrace(`Step ${currentStep} verification failed: ${m21Verification.reason}. Halting execution.`);
+              if (agentExecutionStatus) {
+                agentExecutionStatus.textContent = `Halted: Step ${currentStep} verification failed (${m21Verification.reason})`;
+              }
+              break;
             }
-            break;
           }
 
           // Step 12: Loop termination condition

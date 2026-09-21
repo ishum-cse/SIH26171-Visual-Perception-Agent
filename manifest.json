@@ -31,7 +31,7 @@
   "content_scripts": [
     {
       "matches": ["<all_urls>"],
-      "js": ["form-profile.js", "pii-detector.js", "content.js"],
+      "js": ["form-profile.js", "pii-detector.js", "change-detector.js", "content.js"],
       "run_at": "document_idle"
     }
   ],
