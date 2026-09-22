@@ -370,6 +370,9 @@ class DemoAgentProvider:
                 # the task is identifying the search target input to click/focus, NOT a value to fill!
                 cand_label_norm = _normalize(str(el.get("label", "")))
                 cand_ph_norm = _normalize(str(el.get("placeholder", "")))
+                cand_aria_norm = _normalize(str(el.get("ariaLabel", "")))
+                if any(v in cand_label_norm or v in cand_aria_norm for v in ["voice", "mic", "microphone", "audio", "speak"]):
+                    continue
                 query_norm = _normalize(search_query_val)
                 clean_query_norm = re.sub(r'^(?:the|a|an)\s+', '', query_norm).strip()
                 clean_label_norm = re.sub(r'^(?:the|a|an)\s+', '', cand_label_norm).strip()
@@ -596,6 +599,7 @@ class DemoAgentProvider:
         if any(keyword in task_lower for keyword in ["search", "query", "find input"]):
             input_found = any(
                 str(el.get("semanticTag", "")).upper() == "SEARCH_INPUT" and _is_enabled(el)
+                and not any(v in str(el.get("label", "")).lower() or v in str(el.get("ariaLabel", "")).lower() for v in ["voice", "mic", "microphone", "audio", "speak"])
                 for el in elements
             )
             if input_found:
@@ -759,6 +763,7 @@ For FILL:
 - target identifies the input element.
 - value is the exact text the user wants entered.
 - NEVER use the input's label, placeholder, aria-label, or DOM text as the value unless the user explicitly requested that exact text.
+- For search tasks, target MUST be an editable text input control (<input>, <textarea>, or type=search). NEVER propose "Search by voice" or a microphone button for search or fill actions unless the user explicitly requested voice search.
 
 PRODUCT SELECTION RULES:
 - When the user task asks to identify, select, or open the most relevant product/result for a search query (e.g. 'iPhone 15'):

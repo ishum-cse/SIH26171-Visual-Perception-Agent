@@ -186,6 +186,24 @@ document.addEventListener("DOMContentLoaded", () => {
     });
   }
 
+  // Persistent Side Panel Launcher Handler (when opened inside popup fallback)
+  const openSidePanelBtn = document.getElementById("openSidePanelBtn");
+  if (openSidePanelBtn) {
+    openSidePanelBtn.addEventListener("click", async () => {
+      if (chrome.sidePanel && typeof chrome.sidePanel.open === "function") {
+        try {
+          const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+          if (tab?.windowId) {
+            await chrome.sidePanel.open({ windowId: tab.windowId });
+            window.close();
+          }
+        } catch (err) {
+          console.warn("[SIH26171] Could not open side panel:", err);
+        }
+      }
+    });
+  }
+
   const setLiveAgentStatus = (statusCategory, label) => {
     if (!liveAgentStatusBadge || !liveAgentStatusText) return;
     liveAgentStatusBadge.className = "live-status-badge " + (
@@ -331,6 +349,45 @@ document.addEventListener("DOMContentLoaded", () => {
       .replace(/'/g, "&#039;");
   }
 
+  /**
+   * Critical Rule 7 & 8: Clean reset of all transient task and grounding state.
+   * Ensures previous targets, cards, overlays, and confidence metrics never persist
+   * into a fresh task run or survive failures.
+   */
+  const resetTaskGroundingState = () => {
+    clearBoundingBoxOnPreview();
+    updateCurrentActionCard({
+      stepText: "Step 1 of 1",
+      action: "NONE",
+      target: "(None)",
+      value: "",
+      grounding: "-",
+      risk: "LOW",
+      safety: "PENDING",
+      status: "Initializing..."
+    });
+    updateGroundingInspection({
+      element: "None",
+      role: "none",
+      type: "unknown",
+      index: undefined,
+      method: "-",
+      score: undefined,
+      bbox: null,
+      reason: "No element grounded"
+    });
+    latestVisualElements = null;
+    latestFusedElements = null;
+    latestSensitiveRegions = null;
+    latestOcrSensitiveRegions = [];
+    latestMergedRegions = null;
+    latestVisionResult = null;
+    cachedLightweightSignature = null;
+    cachedPerceptionTimestamp = 0;
+    lastExecutedActionType = null;
+    lastStepVerification = null;
+  };
+
   // Milestone 18: Live Explainable Agent Overlay Telemetry Helper
   const sendOverlayTelemetry = (tabId, message) => {
     if (!tabId || typeof chrome === "undefined" || !chrome.tabs || !chrome.tabs.sendMessage) {
@@ -414,6 +471,7 @@ document.addEventListener("DOMContentLoaded", () => {
   // Milestone 14 Module-Level Loop & Trace State
   let previousScreenSignature = null;
   let executionTraceHistory = [];
+  let activeExecutionSessionToken = 0;
 
   // State cache for current capture pass
   let latestScreenshotDataUrl = null;
@@ -1544,6 +1602,13 @@ document.addEventListener("DOMContentLoaded", () => {
     const tNorm = (targetLabel || "").toLowerCase().replace(/[:*#_\-\/\\]+/g, " ").trim();
     const hNorm = (fieldHint || "").toLowerCase().replace(/[:*#_\-\/\\]+/g, " ").trim();
     if (!tNorm || !hNorm) return false;
+
+    // Critical Rule 1 & 2: Search mail/input must NEVER match non-search field hints
+    const isSearchTarget = /\bsearch\b/i.test(tNorm);
+    const isSearchHint = /\bsearch\b/i.test(hNorm);
+    if (isSearchTarget && !isSearchHint) return false;
+    if (!isSearchTarget && isSearchHint) return false;
+
     if (tNorm === hNorm) return true;
 
     // Direct substring match only when hint length >= 3 to avoid spurious collisions on 1-2 char words
@@ -1560,12 +1625,12 @@ document.addEventListener("DOMContentLoaded", () => {
     // Pre-registered generic semantic synonyms for form fields
     const SYNONYMS = {
       name: ["name", "full name", "your name", "first name", "applicant name", "student name", "candidate name"],
-      email: ["email", "e-mail", "mail", "email address", "your email"],
+      email: ["email", "e-mail", "email address", "your email"],
       phone: ["phone", "mobile", "contact", "telephone", "phone number", "mobile number", "contact number"],
       college: ["college", "university", "institution", "school", "college name", "campus"],
       subject: ["subject", "topic", "title", "subject line"],
       recipient: ["recipient", "recipients", "to", "receiver", "to recipients"],
-      message: ["message", "body", "comments", "description", "text", "message body"],
+      message: ["message", "body", "comments", "description", "text", "message body", "reply message body", "compose body"],
       address: ["address", "street", "residential address", "home address", "postal address"]
     };
 
@@ -1933,7 +1998,8 @@ document.addEventListener("DOMContentLoaded", () => {
   // =====================================================================
   if (runAgentTaskBtn) {
     runAgentTaskBtn.addEventListener("click", async () => {
-      console.log("[SIH26171] Run Agent Task clicked");
+      const currentSessionToken = ++activeExecutionSessionToken;
+      console.log(`[SIH26171] Run Agent Task clicked (Session #${currentSessionToken})`);
       const task = (taskInput ? taskInput.value : "").trim() || "Find the Submit button and click it.";
 
       // Update Browser Agent Status immediately upon click so user sees active state
@@ -1944,17 +2010,10 @@ document.addEventListener("DOMContentLoaded", () => {
       let currentStep = 1;
       let currentRequestId = "-";
 
-      // TASK STATE ISOLATION (M23): Ensure previous task plan/perception state never leaks into new task
-      latestVisualElements = null;
-      latestFusedElements = null;
-      latestSensitiveRegions = null;
-      latestOcrSensitiveRegions = [];
-      latestMergedRegions = null;
-      latestVisionResult = null;
-      cachedLightweightSignature = null;
-      cachedPerceptionTimestamp = 0;
-      lastExecutedActionType = null;
-      lastStepVerification = null;
+      // TASK STATE ISOLATION (M23 & Critical Rules 7 & 8): Ensure previous task plan/perception state never leaks into new task
+      executionTraceHistory = [];
+      renderTraceHistory();
+      resetTaskGroundingState();
 
       try {
         // Retrieve active tab metadata if available for plan context
@@ -2081,6 +2140,39 @@ document.addEventListener("DOMContentLoaded", () => {
         let lastActionKey = null;
         renderTraceHistory();
         resetPipelineUI();
+
+        // SEVENTH REQUIREMENT: Log/debug structured plan & assert plan validity
+        console.log("[SIH26171] TASK:", task);
+        const planDebug = (plannedSteps || []).map(s => ({
+          action: s.type,
+          targetIntent: s.target || s.targetHint || s.fieldHint || "search input",
+          value: s.value || s.query || undefined
+        }));
+        console.log("[SIH26171] PLAN:", JSON.stringify(planDebug, null, 2));
+
+        // Defensive check: If plannedSteps contains a stale value (e.g. "YouTube") not present in user task, correct it
+        if (isPlannedTask && plannedSteps) {
+          const taskLower = task.toLowerCase();
+          for (const st of plannedSteps) {
+            if (st.value && typeof st.value === "string") {
+              const v = st.value.trim().toLowerCase();
+              if (v === "youtube" && !taskLower.includes("youtube")) {
+                console.error("[SIH26171] Stale state leak detected: 'YouTube' in plan for task:", task);
+                const correctVal = (window.SIHTaskParser && typeof window.SIHTaskParser.extractTaskQueryOrValue === "function")
+                  ? window.SIHTaskParser.extractTaskQueryOrValue(task)
+                  : null;
+                st.value = correctVal || "";
+                if (localValuesMap) {
+                  for (const k of Object.keys(localValuesMap)) {
+                    if (String(localValuesMap[k]).toLowerCase() === "youtube") {
+                      localValuesMap[k] = correctVal || "";
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
         if (pipelineStepCounter) {
           pipelineStepCounter.textContent = isPlannedTask ? `Step 1 of ${totalPlannedSteps}` : `Step 1 of ${MAX_AGENT_STEPS}`;
         }
@@ -2222,6 +2314,11 @@ document.addEventListener("DOMContentLoaded", () => {
               ""
             ).replace(/_button|_input/, "").trim();
 
+            const isSearchBoxTarget = Boolean(
+              (targetHint && /\bsearch\s*(?:box|input|field|bar|area)?\b/i.test(targetHint)) ||
+              (currentStepPlan && currentStepPlan.legacyTarget === "SEARCH_INPUT")
+            );
+
             const computeClickScore = (el) => {
               if (!el) return 0;
               if (el.disabled || String(el["aria-disabled"]).toLowerCase() === "true" || el.readOnly) return 0;
@@ -2230,12 +2327,39 @@ document.addEventListener("DOMContentLoaded", () => {
               const labelNorm = normalize(el.label);
               if (!labelNorm && !targetHint) return 0;
 
+              if (isSearchBoxTarget) {
+                // Reject voice/mic controls unless explicitly requested
+                if (!targetHint.includes("voice") && !targetHint.includes("mic")) {
+                  if (/voice|mic|audio|speak/i.test(labelNorm) || /voice|mic|audio|speak/i.test(el.ariaLabel || "")) {
+                    return 0;
+                  }
+                }
+                // Strictly prioritize editable text input
+                if (elType === "input" || elType === "textarea" || el.semanticTag === "SEARCH_INPUT") {
+                  if (labelNorm.includes("search") || el.semanticTag === "SEARCH_INPUT") return 1.0;
+                  return 0.85;
+                }
+                // Heavily penalize buttons when user asked for search box
+                if (elType === "button" || elType === "link") return 0.2;
+              }
+
               if (isExplicitTarget && targetHint) {
                 if (labelNorm === targetHint) return 1.0;
                 if (labelNorm.includes(targetHint)) return 0.95;
                 const tokens = targetHint.split(/\s+/).filter(t => t.length > 2);
                 if (tokens.length > 0 && tokens.every(t => labelNorm.includes(t))) return 0.90;
                 return 0;
+              }
+
+              if (currentStepPlan?.attribute && currentStepPlan?.attributeValue && currentStepPlan?.objectTarget) {
+                const targetObjNorm = normalize(currentStepPlan.objectTarget);
+                const targetValNorm = normalize(currentStepPlan.attributeValue);
+                const candText = [el.label, el.text, el.ariaLabel, el.title, el.alt, el.dataColor].filter(Boolean).map(normalize).join(" ");
+                const objTokens = targetObjNorm.split(/\s+/).filter(t => t.length > 2);
+                const matchesObj = candText.includes(targetObjNorm) || (objTokens.length > 0 && objTokens.every(t => candText.includes(t)));
+                if (!matchesObj) return 0;
+                const matchesAttr = candText.includes(targetValNorm) || (el.dataColor && normalize(el.dataColor).includes(targetValNorm));
+                return matchesAttr ? 0.95 : 0;
               }
 
               if (labelNorm === targetHint) return 1.0;
@@ -2264,7 +2388,10 @@ document.addEventListener("DOMContentLoaded", () => {
               if (!el || el.disabled || String(el["aria-disabled"]).toLowerCase() === "true" || el.readOnly) return;
               const elType = (el.type || "").toLowerCase();
               if (!["input", "textarea", "select"].includes(elType)) return;
+              const labelNorm = normalize(el.label);
+              if (/voice|mic|audio|speak/i.test(labelNorm) || /voice|mic|audio|speak/i.test(el.ariaLabel || "")) return;
               let s = 0;
+              if (/\bsearch\b/i.test(labelNorm) && !/\bsearch\b/i.test(fieldHint)) return;
               if (isFieldMatch(el.label, rawHint)) s = 1.0;
               else {
                 const labelNorm = normalize(el.label);
@@ -2435,7 +2562,7 @@ document.addEventListener("DOMContentLoaded", () => {
             context: (currentStepPlan && currentStepPlan.context) || originalAction?.context || null,
             relation: (currentStepPlan && currentStepPlan.relation) || originalAction?.relation || null,
             ordinal: (currentStepPlan && currentStepPlan.ordinal !== undefined) ? currentStepPlan.ordinal : (originalAction?.ordinal !== undefined ? originalAction.ordinal : null),
-            value: originalAction?.value,
+            value: (currentStepPlan && currentStepPlan.value) ? currentStepPlan.value : originalAction?.value,
             amount: originalAction?.amount,
             groundingScore: groundingScore,
             groundingMethod: matchedCandidate.isVisualConfirmed ? "recovery-dom+visual-fusion" : "recovery-reground"
@@ -2627,6 +2754,10 @@ document.addEventListener("DOMContentLoaded", () => {
         };
 
         while (currentStep <= (isPlannedTask ? totalPlannedSteps : MAX_AGENT_STEPS)) {
+          if (currentSessionToken !== activeExecutionSessionToken) {
+            console.log(`[SIH26171] Aborting superseded session #${currentSessionToken} in favor of #${activeExecutionSessionToken}`);
+            return;
+          }
           const requestId = "SIH-" + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
           currentRequestId = requestId;
           let stepRecoveryNote = null;
@@ -3009,6 +3140,11 @@ document.addEventListener("DOMContentLoaded", () => {
                 ? `Submit search for '${currentStepPlan.query}'`
                 : "Submit search";
               stepFieldPlan = [];
+            } else if (currentStepPlan.type === "NAVIGATE") {
+              taskToSend = currentStepPlan.url
+                ? `Navigate to ${currentStepPlan.url}`
+                : `Navigate to ${currentStepPlan.target || currentStepPlan.targetHint || "destination"}`;
+              stepFieldPlan = [];
             } else if (currentStepPlan.type === "CLICK") {
               const isSearchResultSelection = !!(
                 currentStepPlan.query ||
@@ -3128,6 +3264,7 @@ document.addEventListener("DOMContentLoaded", () => {
               }
 
               await executeTextOnlyFallback(activeTab, pageData, "Gateway error fallback");
+              resetTaskGroundingState();
               executionTraceHistory.push({
                 step: currentStep,
                 requestId,
@@ -3231,7 +3368,25 @@ document.addEventListener("DOMContentLoaded", () => {
           if (currentStepPlan) {
             const plannedType = (currentStepPlan.type || "").toUpperCase();
 
-            if (plannedType === "FILL_FORM") {
+            if (plannedType === "NAVIGATE" || plannedType === "OPEN_URL") {
+              const destination = currentStepPlan.target || currentStepPlan.targetHint || "destination";
+              let targetUrl = currentStepPlan.url;
+              if (!targetUrl && window.SIHTaskParser && typeof window.SIHTaskParser.resolveNavigationUrl === "function") {
+                targetUrl = window.SIHTaskParser.resolveNavigationUrl(destination);
+              }
+              if (!targetUrl) {
+                targetUrl = `https://www.${destination.toLowerCase().replace(/[^a-z0-9\-]/g, "")}.com`;
+              }
+              agentAction = {
+                action: "NAVIGATE",
+                target: destination,
+                targetLabel: destination,
+                url: targetUrl,
+                groundingScore: 1.0,
+                groundingMethod: "navigation-rule",
+                isNavigation: true
+              };
+            } else if (plannedType === "FILL_FORM") {
               agentAction = {
                 action: "FILL_FORM",
                 target: "all form fields",
@@ -3268,16 +3423,24 @@ document.addEventListener("DOMContentLoaded", () => {
 
                 let bestIdx = -1;
                 let bestScore = 0;
+                const expectedRole = (currentStepPlan.expectedRole || currentStepPlan.role || "").toLowerCase();
                 const fillCandidates = latestFusedElements || latestVisualElements || [];
                 fillCandidates.forEach((el, idx) => {
                   if (!FORM_TYPES.has((el.type || "").toLowerCase())) return;
+                  const labelNorm = normalize(el.label);
+                  if (/\bsearch\b/i.test(labelNorm) && !/\bsearch\b/i.test(targetHintNorm)) return;
                   let score = 0;
                   if (isFieldMatch(el.label, currentStepPlan.fieldHint)) {
                     score = 1.0;
                   } else {
-                    const labelNorm = normalize(el.label);
                     if (labelNorm === targetHintNorm) score = 1.0;
                     else if (targetHintNorm.length >= 3 && (labelNorm.includes(targetHintNorm) || targetHintNorm.includes(labelNorm))) score = 0.8;
+                  }
+                  if (score > 0 && expectedRole) {
+                    const elType = (el.type || "").toLowerCase();
+                    if (expectedRole.includes(elType) || (expectedRole.includes("textarea") && (elType === "textarea" || elType === "contenteditable"))) {
+                      score = Math.min(1.0, score + 0.10);
+                    }
                   }
                   if (score > 0 && el.isVisualConfirmed) {
                     score = Math.min(1.0, score + 0.10);
@@ -3310,13 +3473,20 @@ document.addEventListener("DOMContentLoaded", () => {
                     latestVisualElements = recoveryPage.visualElements;
                     (latestVisualElements || []).forEach((el, idx) => {
                       if (!FORM_TYPES.has((el.type || "").toLowerCase())) return;
+                      const labelNorm = normalize(el.label);
+                      if (/\bsearch\b/i.test(labelNorm) && !/\bsearch\b/i.test(targetHintNorm)) return;
                       let score = 0;
                       if (isFieldMatch(el.label, currentStepPlan.fieldHint)) {
                         score = 1.0;
                       } else {
-                        const labelNorm = normalize(el.label);
                         if (labelNorm === targetHintNorm) score = 1.0;
                         else if (targetHintNorm.length >= 3 && (labelNorm.includes(targetHintNorm) || targetHintNorm.includes(labelNorm))) score = 0.8;
+                      }
+                      if (score > 0 && expectedRole) {
+                        const elType = (el.type || "").toLowerCase();
+                        if (expectedRole.includes(elType) || (expectedRole.includes("textarea") && (elType === "textarea" || elType === "contenteditable"))) {
+                          score = Math.min(1.0, score + 0.10);
+                        }
                       }
                       if (score > bestScore) {
                         bestScore = score;
@@ -3375,7 +3545,30 @@ document.addEventListener("DOMContentLoaded", () => {
                 "battery pack", "power bank", "ear tips"
               ];
 
+              const isSearchBoxTarget = Boolean(
+                (currentStepPlan.targetHint && /\bsearch\s*(?:box|input|field|bar|area)?\b/i.test(currentStepPlan.targetHint)) ||
+                currentStepPlan.legacyTarget === "SEARCH_INPUT"
+              );
+
               let isCompatibleClick = agentAction && agentAction.action === "CLICK";
+              if (isCompatibleClick && isSearchBoxTarget) {
+                const candLabel = (agentAction.targetLabel || agentAction.target || "").toLowerCase();
+                const candType = (agentAction.targetType || "").toLowerCase();
+                // Reject voice controls when user requested search box
+                if (/voice|mic|audio|speak/i.test(candLabel)) {
+                  isCompatibleClick = false;
+                } else if (candType === "button" && !candLabel.includes("search input") && !candLabel.includes("search box")) {
+                  const hasActualInput = (latestFusedElements || latestVisualElements || []).some(el => {
+                    const t = (el.type || "").toLowerCase();
+                    const l = (el.label || "").toLowerCase();
+                    return (t === "input" || t === "textarea" || el.semanticTag === "SEARCH_INPUT") &&
+                           (l.includes("search") || el.semanticTag === "SEARCH_INPUT" || !/voice|mic/i.test(l));
+                  });
+                  if (hasActualInput) {
+                    isCompatibleClick = false;
+                  }
+                }
+              }
               if (isCompatibleClick && isExplicitTarget && explicitTargetVal) {
                 const candLabel = (agentAction.targetLabel || agentAction.target || "").toLowerCase();
                 if (!candLabel.includes(explicitTargetVal)) {
@@ -3402,10 +3595,23 @@ document.addEventListener("DOMContentLoaded", () => {
                 }
               }
 
+              if (isCompatibleClick && currentStepPlan?.attribute && currentStepPlan?.attributeValue) {
+                const targetValNorm = (currentStepPlan.attributeValue || "").toLowerCase();
+                const candLabel = (agentAction.targetLabel || agentAction.target || "").toLowerCase();
+                if (!candLabel.includes(targetValNorm)) {
+                  isCompatibleClick = false; // Discard Gemini suggestion if it doesn't verify the attribute
+                }
+              }
+
               if (!isCompatibleClick || agentAction.targetIndex === undefined) {
                 const normalize = (s) => (s || "").trim().toLowerCase();
                 const rawHint = normalize(currentStepPlan.targetHint || currentStepPlan.legacyTarget || agentAction?.target || "").replace(/_button|_input/, "").trim();
                 const cleanHint = rawHint.replace(/\s+(?:box|input|field|area|button|link|section|tab|panel|container|header|heading|option|checkbox)$/i, "").trim();
+
+                const hasAttributeConstraint = Boolean(currentStepPlan?.attribute && currentStepPlan?.attributeValue && currentStepPlan?.objectTarget);
+                const targetObjNorm = hasAttributeConstraint ? normalize(currentStepPlan.objectTarget) : null;
+                const targetAttrNorm = hasAttributeConstraint ? normalize(currentStepPlan.attribute) : null;
+                const targetValNorm = hasAttributeConstraint ? normalize(currentStepPlan.attributeValue) : null;
 
                 const computeClickScore = (el) => {
                   if (el.disabled || String(el["aria-disabled"]).toLowerCase() === "true") return 0;
@@ -3413,6 +3619,24 @@ document.addEventListener("DOMContentLoaded", () => {
                   const ALLOWED_CLICK_TYPES = ["button", "link", "input", "element", "heading", "tab", "menuitem", "option", "checkbox", "radio", "switch", "select", "section"];
                   if (!ALLOWED_CLICK_TYPES.includes(elType)) return 0;
                   const labelNorm = normalize(el.label);
+
+                  // STRICT SEARCH BOX GROUNDING: Prefer editable text entry; reject voice/mic controls
+                  if (isSearchBoxTarget) {
+                    if (!rawHint.includes("voice") && !rawHint.includes("mic")) {
+                      if (/voice|mic|audio|speak/i.test(labelNorm) || /voice|mic|audio|speak/i.test(el.ariaLabel || "")) {
+                        return 0;
+                      }
+                    }
+                    if (elType === "input" || elType === "textarea" || el.semanticTag === "SEARCH_INPUT") {
+                      if (labelNorm.includes("search") || el.semanticTag === "SEARCH_INPUT" || (el.placeholder && el.placeholder.toLowerCase().includes("search"))) {
+                        return 1.0;
+                      }
+                      return 0.85;
+                    }
+                    if (elType === "button" || elType === "link") {
+                      return 0.2;
+                    }
+                  }
 
                   // STRICT TARGET VALIDATION: If user specified an explicit named target, verify strictly against it
                   if (isExplicitTarget && explicitTargetVal) {
@@ -3427,6 +3651,30 @@ document.addEventListener("DOMContentLoaded", () => {
                       return 0.90;
                     }
                     // NEVER match solely on search query tokens when an explicit target is requested!
+                    return 0;
+                  }
+
+                  // ATTRIBUTE-CONSTRAINED TARGET GROUNDING (Color / Descriptive attributes)
+                  if (hasAttributeConstraint) {
+                    const candTextParts = [
+                      el.label,
+                      el.text,
+                      el.ariaLabel,
+                      el.title,
+                      el.alt,
+                      el.dataColor,
+                      el.placeholder
+                    ].filter(Boolean).map(normalize);
+                    const candFullText = candTextParts.join(" ");
+
+                    const objTokens = targetObjNorm.split(/\s+/).filter(t => t.length > 2);
+                    const matchesObject = candFullText.includes(targetObjNorm) || (objTokens.length > 0 && objTokens.every(t => candFullText.includes(t)));
+                    if (!matchesObject) return 0;
+
+                    const matchesAttribute = candFullText.includes(targetValNorm) || (el.dataColor && normalize(el.dataColor).includes(targetValNorm));
+                    if (matchesAttribute) {
+                      return 0.95;
+                    }
                     return 0;
                   }
 
@@ -3476,7 +3724,8 @@ document.addEventListener("DOMContentLoaded", () => {
                     score = Math.max(score, 0.9);
                   }
                   if (score > 0) {
-                    if (rawHint.includes("button")) {
+                    const expectedRole = (currentStepPlan.expectedRole || currentStepPlan.role || "").toLowerCase();
+                    if (expectedRole === "button" || rawHint.includes("button")) {
                       if (elType === "button" || el.semanticTag?.includes("BUTTON")) score += 0.1;
                       else score *= 0.5;
                     }
@@ -3490,8 +3739,36 @@ document.addEventListener("DOMContentLoaded", () => {
 
                 let bestIdx = -1;
                 let bestScore = 0;
+                let verifiedAttributeMatches = [];
+                let objectFoundWithoutAttribute = false;
+
                 const clickCandidates = latestFusedElements || latestVisualElements || [];
                 clickCandidates.forEach((el, idx) => {
+                  if (hasAttributeConstraint) {
+                    const candTextParts = [
+                      el.label,
+                      el.text,
+                      el.ariaLabel,
+                      el.title,
+                      el.alt,
+                      el.dataColor,
+                      el.placeholder
+                    ].filter(Boolean).map(normalize);
+                    const candFullText = candTextParts.join(" ");
+                    const objTokens = targetObjNorm.split(/\s+/).filter(t => t.length > 2);
+                    const matchesObject = candFullText.includes(targetObjNorm) || (objTokens.length > 0 && objTokens.every(t => candFullText.includes(t)));
+                    const matchesAttribute = candFullText.includes(targetValNorm) || (el.dataColor && normalize(el.dataColor).includes(targetValNorm));
+
+                    if (matchesObject && !matchesAttribute) {
+                      objectFoundWithoutAttribute = true;
+                    }
+                    if (matchesObject && matchesAttribute) {
+                      let s = 0.95;
+                      if (el.isVisualConfirmed) s = 1.0;
+                      verifiedAttributeMatches.push({ el, idx, score: s });
+                    }
+                  }
+
                   let s = computeClickScore(el);
                   if (s > 0 && el.isVisualConfirmed) {
                     s = Math.min(1.0, s + 0.10);
@@ -3502,6 +3779,45 @@ document.addEventListener("DOMContentLoaded", () => {
                   }
                 });
 
+                if (hasAttributeConstraint) {
+                  if (verifiedAttributeMatches.length === 1) {
+                    bestIdx = verifiedAttributeMatches[0].idx;
+                    bestScore = verifiedAttributeMatches[0].score;
+                  } else if (verifiedAttributeMatches.length > 1) {
+                    const ordinal = currentStepPlan?.ordinal;
+                    if (typeof ordinal === "number" && ordinal >= 1 && ordinal <= verifiedAttributeMatches.length) {
+                      bestIdx = verifiedAttributeMatches[ordinal - 1].idx;
+                      bestScore = verifiedAttributeMatches[ordinal - 1].score;
+                    } else {
+                      // Ambiguous attribute targets: multiple matches without distinguishing ordinal/evidence
+                      bestIdx = -1;
+                      bestScore = 0;
+                      agentAction = {
+                        action: "NONE",
+                        target: null,
+                        targetLabel: currentStepPlan.targetHint || currentStepPlan.target,
+                        groundingScore: 0,
+                        groundingMethod: "ambiguous-attribute-targets",
+                        reason: `Target ambiguous: multiple identical '${targetValNorm} ${targetObjNorm}' elements found on page without distinguishing evidence`,
+                        blockedReason: `Multiple '${targetValNorm} ${targetObjNorm}' candidates found on page. Action: BLOCKED`
+                      };
+                    }
+                  } else if (objectFoundWithoutAttribute) {
+                    // Object found, but attribute unverified -> BLOCK
+                    bestIdx = -1;
+                    bestScore = 0;
+                    agentAction = {
+                      action: "NONE",
+                      target: null,
+                      targetLabel: currentStepPlan.targetHint || currentStepPlan.target,
+                      groundingScore: 0,
+                      groundingMethod: "attribute-not-verified",
+                      reason: `Target attribute not verified: object '${targetObjNorm}' found on current page, but attribute '${targetAttrNorm} = ${targetValNorm}' has insufficient evidence`,
+                      blockedReason: `Object found: ${targetObjNorm}, Requested attribute: ${targetAttrNorm} = ${targetValNorm}, Attribute evidence: insufficient, Confidence: below threshold, Action: BLOCKED`
+                    };
+                  }
+                }
+
                 if (bestIdx >= 0 && bestScore >= 0.35) {
                   const matchedEl = clickCandidates[bestIdx];
                   agentAction = {
@@ -3511,9 +3827,9 @@ document.addEventListener("DOMContentLoaded", () => {
                     targetType: matchedEl.type,
                     targetLabel: matchedEl.label,
                     groundingScore: bestScore,
-                    groundingMethod: matchedEl.isVisualConfirmed ? "dom+visual-fusion" : "local-fuzzy-match"
+                    groundingMethod: hasAttributeConstraint ? "attribute-verified-grounding" : (matchedEl.isVisualConfirmed ? "dom+visual-fusion" : "local-fuzzy-match")
                   };
-                } else {
+                } else if (!agentAction || (agentAction.groundingMethod !== "attribute-not-verified" && agentAction.groundingMethod !== "ambiguous-attribute-targets")) {
                   // Section 5 Bounded Recovery: Live DOM re-perception before falling back
                   const recoveryPage = await new Promise((r) => {
                     setTimeout(() => {
@@ -3540,7 +3856,7 @@ document.addEventListener("DOMContentLoaded", () => {
                         targetType: matchedEl.type,
                         targetLabel: matchedEl.label,
                         groundingScore: bestScore,
-                        groundingMethod: "bounded-recovery-match"
+                        groundingMethod: hasAttributeConstraint ? "attribute-verified-grounding" : "bounded-recovery-match"
                       };
                     }
                   }
@@ -3548,7 +3864,7 @@ document.addEventListener("DOMContentLoaded", () => {
                   if (bestIdx < 0 || bestScore < 0.35) {
                     const missingTargetLabel = currentStepPlan.explicitTarget || currentStepPlan.targetHint || currentStepPlan.target || rawHint;
                     let legacyFoundIdx = -1;
-                    if (currentStepPlan.legacyTarget && !isExplicitTarget) {
+                    if (currentStepPlan.legacyTarget && !isExplicitTarget && !hasAttributeConstraint) {
                       const legCand = clickCandidates.findIndex((el) => el.semanticTag === currentStepPlan.legacyTarget || (el.label && el.label.toLowerCase().includes(currentStepPlan.legacyTarget.toLowerCase())));
                       if (legCand >= 0) legacyFoundIdx = legCand;
                     }
@@ -3681,6 +3997,10 @@ document.addEventListener("DOMContentLoaded", () => {
               actionDisplay = fillVal
                 ? `FILL → ${targetStr} (value: '${fillVal}')`
                 : `FILL → ${targetStr}`;
+            } else if (agentAction.action === "NAVIGATE" || agentAction.action === "OPEN_URL") {
+              actionDisplay = agentAction.url
+                ? `NAVIGATE → ${agentAction.target} (${agentAction.url})`
+                : `NAVIGATE → ${agentAction.target}`;
             } else if (agentAction.amount !== undefined && agentAction.amount !== null) {
               actionDisplay = `${agentAction.action} → ${targetStr} (amount: ${agentAction.amount})`;
             } else {
@@ -3701,6 +4021,10 @@ document.addEventListener("DOMContentLoaded", () => {
               groundingMethodText.textContent = agentAction.groundingMethod || "local-fuzzy-match";
               groundingScoreText.textContent = agentAction.groundingScore !== undefined ? String(agentAction.groundingScore) : "-";
               groundedElementText.textContent = `${agentAction.targetType}: '${agentAction.targetLabel}'`;
+            } else if (agentAction?.action === "NAVIGATE" || agentAction?.action === "OPEN_URL") {
+              groundingMethodText.textContent = "navigation-rule";
+              groundingScoreText.textContent = "1.00";
+              groundedElementText.textContent = `Destination: '${agentAction.target}'`;
             } else if (agentAction?.target) {
               groundingMethodText.textContent = "keyword-rule (fixed target)";
               groundingScoreText.textContent = "-";
@@ -3865,19 +4189,52 @@ document.addEventListener("DOMContentLoaded", () => {
               const isExplicit = !!(currentStepPlan?.isExplicitTarget);
 
               if (isExplicit || (isPlannedTask && currentStepPlan && currentStepPlan.type !== "NONE")) {
-                if (agentSafetyStatus) agentSafetyStatus.textContent = "BLOCKED (Target not found in perception)";
-                if (agentExecutionStatus) agentExecutionStatus.textContent = `TARGET NOT FOUND: '${targetName}'`;
-                if (executionOutput) executionOutput.value = `TARGET NOT FOUND: Target '${targetName}' does not exist in current page perception.`;
-                if (agentVerificationText) {
-                  agentVerificationText.textContent = `Verification: Target '${targetName}' not found in current page perception.`;
-                  agentVerificationText.style.color = "#c62828";
+                const isAttrBlocked = agentAction?.groundingMethod === "attribute-not-verified";
+                const isAmbiguousBlocked = agentAction?.groundingMethod === "ambiguous-attribute-targets";
+
+                if (isAttrBlocked) {
+                  if (agentSafetyStatus) agentSafetyStatus.textContent = "BLOCKED (Target attribute not verified)";
+                  if (agentExecutionStatus) agentExecutionStatus.textContent = `TARGET ATTRIBUTE NOT VERIFIED: '${targetName}'`;
+                  if (executionOutput) executionOutput.value = agentAction.blockedReason || `TARGET ATTRIBUTE NOT VERIFIED: Object found on page but attribute evidence is insufficient.`;
+                  if (agentVerificationText) {
+                    agentVerificationText.textContent = `Verification: Attribute not verified for target '${targetName}'.`;
+                    agentVerificationText.style.color = "#c62828";
+                  }
+                  updatePipelineStage("SAFETY", "failed", "Blocked (Attribute Not Verified)");
+                  updatePipelineStage("EXECUTION", "pending", "Skipped");
+                  updatePipelineStage("VERIFICATION", "failed", "Attribute Not Verified");
+                  appendPlannerTrace(`Grounding FAILED: Attribute not verified for target '${targetName}'.`);
+                  appendPlannerTrace("Safety Gate: Execution BLOCKED due to unverified attribute.");
+                  appendPlannerTrace("Loop halted cleanly without execution.");
+                } else if (isAmbiguousBlocked) {
+                  if (agentSafetyStatus) agentSafetyStatus.textContent = "BLOCKED (Target ambiguous)";
+                  if (agentExecutionStatus) agentExecutionStatus.textContent = `TARGET AMBIGUOUS: '${targetName}'`;
+                  if (executionOutput) executionOutput.value = agentAction.blockedReason || `TARGET AMBIGUOUS: Multiple matching candidates found on page.`;
+                  if (agentVerificationText) {
+                    agentVerificationText.textContent = `Verification: Multiple ambiguous matches for target '${targetName}'.`;
+                    agentVerificationText.style.color = "#c62828";
+                  }
+                  updatePipelineStage("SAFETY", "failed", "Blocked (Target Ambiguous)");
+                  updatePipelineStage("EXECUTION", "pending", "Skipped");
+                  updatePipelineStage("VERIFICATION", "failed", "Target Ambiguous");
+                  appendPlannerTrace(`Grounding FAILED: Multiple ambiguous matches for target '${targetName}'.`);
+                  appendPlannerTrace("Safety Gate: Execution BLOCKED due to ambiguous target.");
+                  appendPlannerTrace("Loop halted cleanly without execution.");
+                } else {
+                  if (agentSafetyStatus) agentSafetyStatus.textContent = "BLOCKED (Target not found in perception)";
+                  if (agentExecutionStatus) agentExecutionStatus.textContent = `TARGET NOT FOUND: '${targetName}'`;
+                  if (executionOutput) executionOutput.value = `TARGET NOT FOUND: Target '${targetName}' does not exist in current page perception.`;
+                  if (agentVerificationText) {
+                    agentVerificationText.textContent = `Verification: Target '${targetName}' not found in current page perception.`;
+                    agentVerificationText.style.color = "#c62828";
+                  }
+                  updatePipelineStage("SAFETY", "failed", "Blocked (Missing Target)");
+                  updatePipelineStage("EXECUTION", "pending", "Skipped");
+                  updatePipelineStage("VERIFICATION", "failed", "Target Not Found");
+                  appendPlannerTrace(`Grounding FAILED: Target '${targetName}' not found in current perception.`);
+                  appendPlannerTrace("Safety Gate: Execution BLOCKED due to ungrounded target.");
+                  appendPlannerTrace("Loop halted cleanly without execution.");
                 }
-                updatePipelineStage("SAFETY", "failed", "Blocked (Missing Target)");
-                updatePipelineStage("EXECUTION", "pending", "Skipped");
-                updatePipelineStage("VERIFICATION", "failed", "Target Not Found");
-                appendPlannerTrace(`Grounding FAILED: Target '${targetName}' not found in current perception.`);
-                appendPlannerTrace("Safety Gate: Execution BLOCKED due to ungrounded target.");
-                appendPlannerTrace("Loop halted cleanly without execution.");
               } else {
                 if (agentSafetyStatus) agentSafetyStatus.textContent = "PASSED (No-op action safely handled)";
                 if (agentExecutionStatus) agentExecutionStatus.textContent = "Task complete (No further action needed)";
@@ -3888,6 +4245,8 @@ document.addEventListener("DOMContentLoaded", () => {
                 }
               }
 
+              const isAttrBlocked = agentAction?.groundingMethod === "attribute-not-verified";
+              const isAmbiguousBlocked = agentAction?.groundingMethod === "ambiguous-attribute-targets";
               executionTraceHistory.push({
                 step: currentStep,
                 totalSteps: isPlannedTask ? totalPlannedSteps : MAX_AGENT_STEPS,
@@ -3895,8 +4254,8 @@ document.addEventListener("DOMContentLoaded", () => {
                 action: agentAction,
                 executed: false,
                 status: (isExplicit || isPlannedTask) ? "blocked" : "completed",
-                executionResult: (isExplicit || isPlannedTask) ? `TARGET NOT FOUND: Target '${targetName}' not found in current page perception` : "Skipped (Action is NONE)",
-                verification: (isExplicit || isPlannedTask) ? "TARGET NOT FOUND / ACTION BLOCKED" : "Goal completed"
+                executionResult: isAttrBlocked ? `TARGET ATTRIBUTE NOT VERIFIED: '${targetName}'` : (isAmbiguousBlocked ? `TARGET AMBIGUOUS: '${targetName}'` : ((isExplicit || isPlannedTask) ? `TARGET NOT FOUND: Target '${targetName}' not found in current page perception` : "Skipped (Action is NONE)")),
+                verification: isAttrBlocked ? "TARGET ATTRIBUTE NOT VERIFIED / ACTION BLOCKED" : (isAmbiguousBlocked ? "TARGET AMBIGUOUS / ACTION BLOCKED" : ((isExplicit || isPlannedTask) ? "TARGET NOT FOUND / ACTION BLOCKED" : "Goal completed"))
               });
               renderTraceHistory();
               break;
@@ -4410,7 +4769,43 @@ document.addEventListener("DOMContentLoaded", () => {
           };
 
           let rawExecResult = null;
-          await new Promise((resolveExec) => {
+          if (agentAction.action === "NAVIGATE" || agentAction.action === "OPEN_URL") {
+            const destName = agentAction.target || agentAction.targetLabel || "destination";
+            let navUrl = agentAction.url;
+            if (!navUrl && window.SIHTaskParser && typeof window.SIHTaskParser.resolveNavigationUrl === "function") {
+              navUrl = window.SIHTaskParser.resolveNavigationUrl(destName);
+            }
+            if (!navUrl) {
+              const clean = String(destName).toLowerCase().replace(/[^a-z0-9\-]/g, "");
+              navUrl = `https://www.${clean}.com`;
+            }
+
+            try {
+              if (chrome.tabs && typeof chrome.tabs.update === "function" && activeTab?.id) {
+                await new Promise((resolveNav) => {
+                  chrome.tabs.update(activeTab.id, { url: navUrl }, (updatedTab) => {
+                    if (chrome.runtime.lastError) {
+                      console.warn("[SIH26171] chrome.tabs.update error:", chrome.runtime.lastError.message);
+                      chrome.tabs.sendMessage(activeTab.id, { action: "executeAction", payload: { action: "NAVIGATE", url: navUrl, target: destName } }, () => resolveNav(null));
+                    } else {
+                      resolveNav(updatedTab);
+                    }
+                  });
+                });
+              } else {
+                await new Promise((resolveNav) => {
+                  chrome.tabs.sendMessage(activeTab.id, { action: "executeAction", payload: { action: "NAVIGATE", url: navUrl, target: destName } }, () => resolveNav(null));
+                });
+              }
+              actionExecutedSuccessfully = true;
+              actionExecutionSummary = `Executed: NAVIGATE → ${destName} (${navUrl})`;
+              rawExecResult = { executed: true, action: "NAVIGATE", target: destName, url: navUrl };
+            } catch (navErr) {
+              actionExecutionSummary = `Navigation error: ${navErr.message}`;
+              rawExecResult = { executed: false, reason: navErr.message };
+            }
+          } else {
+            await new Promise((resolveExec) => {
             chrome.tabs.sendMessage(
               activeTab.id,
               { action: "executeAction", payload: executionPayload },
@@ -4457,6 +4852,7 @@ document.addEventListener("DOMContentLoaded", () => {
               }
             );
           });
+          }
           console.log("[SIH26171] Action execution completed");
 
           if (executionOutput) executionOutput.value = actionExecutionSummary;
@@ -4637,7 +5033,11 @@ document.addEventListener("DOMContentLoaded", () => {
 
           // Step 11: Post-Action Verification via Screen-Change Detection & M21.1 Action Verifier
           // If an action could navigate or update the DOM, wait for page to stabilize
-          if (agentAction.action === "SUBMIT") {
+          if (agentAction.action === "NAVIGATE" || agentAction.action === "OPEN_URL") {
+            setAgentState(AGENT_STATES.WAIT, `Navigating to ${agentAction.target}...`);
+            await waitForTabReady(activeTab.id, 8000);
+            setAgentState(AGENT_STATES.REPERCEIVE, `Observing navigated page (${agentAction.target})...`);
+          } else if (agentAction.action === "SUBMIT") {
             setAgentState(AGENT_STATES.WAIT, "Waiting for search results...");
             await waitForSearchResultsStabilization(activeTab.id, 5000);
             await waitForTabReady(activeTab.id, 6000);
@@ -4932,12 +5332,21 @@ document.addEventListener("DOMContentLoaded", () => {
             }
           }
 
+          // Critical Rule 3 & 5: Check explicit stop conditions (e.g. "stop after filling", "do not send")
+          const taskStopAfterFill = (parsedTask?.stopCondition === "AFTER_FILL" || reasoningPlan?.stopCondition === "AFTER_FILL");
+          if (taskStopAfterFill && executedThisStep && (agentAction?.action === "FILL" || currentStepPlan?.type === "FILL")) {
+            hasMoreSteps = false;
+            appendPlannerTrace("Execution constraint reached: Stopped after filling as requested by user.");
+          }
+
           const shouldContinue = executedThisStep && (isPlannedTask ? hasMoreSteps : (screenActuallyChanged && currentStep < MAX_AGENT_STEPS));
 
           if (!shouldContinue) {
             // Check if overall task is truly completed
             let isOverallDone = false;
-            if (isPlannedTask && totalPlannedSteps > 0) {
+            if (taskStopAfterFill && executedThisStep && (agentAction?.action === "FILL" || currentStepPlan?.type === "FILL")) {
+              isOverallDone = true;
+            } else if (isPlannedTask && totalPlannedSteps > 0) {
               const allStepsExecuted = currentStep >= totalPlannedSteps && executedThisStep;
               const hasNoFailedOrBlockedTraces = !executionTraceHistory.some(
                 (t) => !t.executed || t.status === "blocked" || t.status === "rejected" || t.status === "unresolved" || t.status === "cancelled_by_user"

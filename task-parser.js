@@ -34,6 +34,36 @@
   }
 
   /**
+   * Safely and generically resolves a destination name or URL into an executable URL.
+   * Universal and website-agnostic: never hardcodes specific domains.
+   * @param {string} target
+   * @returns {string|null}
+   */
+  function resolveNavigationUrl(target) {
+    if (!target) return null;
+    const t = String(target).trim();
+    if (/^https?:\/\//i.test(t)) {
+      return t;
+    }
+    if (/^www\./i.test(t)) {
+      return "https://" + t;
+    }
+    // Match common domain patterns e.g. "wikipedia.org", "github.com", "my-site.co.uk", "localhost:8000"
+    if (/^[a-zA-Z0-9_\-]+\.[a-zA-Z]{2,}(?:\/.*)?$/i.test(t)) {
+      return "https://" + t;
+    }
+    if (/^localhost(?::\d+)?(?:\/.*)?$/i.test(t)) {
+      return "http://" + t;
+    }
+    // Generic destination name (e.g. YouTube, Amazon, Wikipedia, GitHub, Google, Gmail)
+    const cleanName = t.toLowerCase().replace(/[^a-z0-9\-]/g, "");
+    if (cleanName) {
+      return `https://www.${cleanName}.com`;
+    }
+    return null;
+  }
+
+  /**
    * Cleans field hints by stripping trailing control types and leading articles.
    * e.g. "Name field" -> "Name", "the email address" -> "email address"
    * @param {string} field
@@ -44,6 +74,8 @@
     let f = field.trim();
     f = f.replace(/\s+(?:field|input|box|area|textbox)$/i, "").trim();
     f = f.replace(/^(?:the|a|an|my|our|your)\s+/i, "").trim();
+    f = f.replace(/\s+(?:and\s+then|and|then|after\s+that|next|followed\s+by|also)$/i, "").trim();
+    f = f.replace(/^(?:and\s+then|and|then|after\s+that|next|followed\s+by|also)\s+/i, "").trim();
     return f;
   }
 
@@ -89,11 +121,26 @@
     if (!task || typeof task !== "string") return null;
     const taskClean = task.trim();
 
+    // 0. Platform search pattern: "search <Platform> for <query>" (e.g. "search Gmail for emails about SIH")
+    const mPlatformSearch = taskClean.match(/\bsearch\s+([a-zA-Z0-9_\-]+)\s+for\s+['"]?([^'",;]+?)['"]?(?:\s+(?:and\s+then|and|then|after\s+that|next|followed\s+by|also)\b|[.,;!?]|$)/i);
+    if (mPlatformSearch && !/^(?:the|a|an|box|input|field|bar|area|button|for)$/i.test(mPlatformSearch[1])) {
+      let val = cleanValue(mPlatformSearch[2]);
+      if (val) {
+        val = val.replace(/\s+(?:and\s+then|and|then|after\s+that|next|followed\s+by|also)$/i, "").trim();
+      }
+      if (val && !/^(?:the|a|an|it|this|that|box|input|field|bar|area|button)$/i.test(val)) {
+        return val;
+      }
+    }
+
     // 1. Search query pattern (takes precedence when searching):
     // Strictly bounds the query before verbs like 'and identify', 'and find', 'and open', 'and click', 'and select', 'and visit', etc.
-    const mSearch = taskClean.match(/(?<!\bfill\s)(?<!\benter\s)(?<!\btype\s)(?<!\bclick\s)(?<!\bfind\s)\bsearch\s+(?:for\s+)?(?!(?:the\s+)?(?:box|input|field|bar|area|button)\b)['"]?([^'",;]+?)['"]?(?:\s+(?:and\s+then|and\s+(?:identify|find|open|click|select|locate|choose|visit)|then\s+(?:identify|find|open|click|select|locate|choose|visit))\b|[.,;!?]|$)/i);
+    const mSearch = taskClean.match(/(?<!\bfill\s)(?<!\benter\s)(?<!\btype\s)(?<!\bclick\s)(?<!\bfind\s)\bsearch\s+(?:for\s+)?(?!(?:the\s+)?(?:box|input|field|bar|area|button)\b)['"]?([^'",;]+?)['"]?(?:\s+(?:and\s+then|and|then|after\s+that|next|followed\s+by|also)\s+(?:identify|find|open|click|select|choose|visit|view|launch|pick|tap|press|see|go\s+to|navigate\s+to)\b|\s+(?:then|after\s+that|next|followed\s+by|and\s+then)\b|(?:\s+[.,;!?]|[.,;!?](?:\s+|$))|$)/i);
     if (mSearch) {
-      const val = cleanValue(mSearch[1]);
+      let val = cleanValue(mSearch[1]);
+      if (val) {
+        val = val.replace(/\s+(?:and\s+then|and|then|after\s+that|next|followed\s+by|also)$/i, "").trim();
+      }
       if (val && !/^(?:the|a|an|it|this|that|box|input|field|bar|area|button)$/i.test(val)) {
         return val;
       }
@@ -114,16 +161,18 @@
     }
 
     // 4. Explicit fill pattern: "fill/set [the] <field> as/with/to <val>"
-    const mFill = taskClean.match(/\b(?:fill|set)\b.*?\b(?:as|with|value|to)\s+['"]?([^'",;]+?)['"]?(?:\s+(?:and|then)\b|[.,;!?]|$)/i);
+    const mFill = taskClean.match(/\b(?:fill|set)\b.*?\b(?:as|with|value|to)\s+['"]?([^'",;]+?)['"]?(?:\s+(?:and\s+then|and|then|after\s+that|next|followed\s+by|also)\b|[.,;!?]|$)/i);
     if (mFill) {
-      const val = cleanValue(mFill[1]);
+      let val = cleanValue(mFill[1]);
+      if (val) val = val.replace(/\s+(?:and\s+then|and|then|after\s+that|next|followed\s+by|also)$/i, "").trim();
       if (val && !/^(?:the|a|an|box|input|field|button)$/i.test(val)) return val;
     }
 
     // 5. Standalone type/write pattern: "type/write <val>"
-    const mType = taskClean.match(/\b(?:type|write)\s+['"]?([^'",;]+?)['"]?(?:\s+(?:and|then)\b|[.,;!?]|$)/i);
+    const mType = taskClean.match(/\b(?:type|write)\s+['"]?([^'",;]+?)['"]?(?:\s+(?:and\s+then|and|then|after\s+that|next|followed\s+by|also)\b|[.,;!?]|$)/i);
     if (mType) {
-      const val = cleanValue(mType[1]);
+      let val = cleanValue(mType[1]);
+      if (val) val = val.replace(/\s+(?:and\s+then|and|then|after\s+that|next|followed\s+by|also)$/i, "").trim();
       if (val && !/^(?:the|a|an|box|input|field|button|it|this|that)$/i.test(val)) return val;
     }
 
@@ -146,12 +195,12 @@
     if (!text) return null;
 
     // Explicit non-fill actions must never be parsed as fill clauses
-    if (/^(?:click|press|tap|open|scroll|view|navigate|go\s+to|select|choose|check|uncheck|toggle)\b/i.test(text)) {
+    if (/^(?:click|press|tap|open|scroll|view|navigate|go\s+to|select|choose|check|uncheck|toggle|enable|disable|turn|save|download|look|add|reply|compose|send)\b/i.test(text)) {
       return null;
     }
 
-    // Pattern 1a: 'enter/type/put <val> as [the] <field>' (CRITICAL: val is BEFORE 'as', field is AFTER 'as')
-    const enterAsMatch = text.match(/^(?:enter|type|put)\s+(.+?)\s+as\s+(?:the\s+)?([a-zA-Z0-9_\-\s]+?)(?:\s+field|\s+input|\s+box|\s+area)?$/i);
+    // Pattern 1a: 'enter/type/put/write <val> as [the] <field>' (CRITICAL: val is BEFORE 'as', field is AFTER 'as')
+    const enterAsMatch = text.match(/^(?:enter|type|put|write)\s+(.+?)\s+as\s+(?:the\s+)?([a-zA-Z0-9_\-\s]+?)(?:\s+field|\s+input|\s+box|\s+area|\s+textbox)?$/i);
     if (enterAsMatch) {
       const val = cleanValue(enterAsMatch[1]);
       const field = cleanFieldHint(enterAsMatch[2]);
@@ -160,13 +209,15 @@
       }
     }
 
-    // Pattern 1b: '[enter/type/put] <val> in/into/for <field>'
-    const enterInMatch = text.match(/^(?:(?:enter|type|put)\s+)?(.+?)\s+in(?:to|for)?\s+(?:the\s+)?([a-zA-Z0-9_\-\s]+?)(?:\s+field|\s+input|\s+box|\s+area)?$/i);
-    if (enterInMatch) {
-      const val = cleanValue(enterInMatch[1]);
-      const field = cleanFieldHint(enterInMatch[2]);
-      if (val && field && !isPronounOrReference(field) && !/^(?:the|a|an|to)$/i.test(val)) {
-        return { type: "FILL", fieldHint: field, value: val };
+    // Pattern 1b: '[enter/type/put/write] <val> in/into/for/to <field>' (only if not starting with set/fill where field precedes val)
+    if (!/^(?:set|fill)\b/i.test(text)) {
+      const enterInMatch = text.match(/^(?:(?:enter|type|put|write)\s+)?(.+?)\s+(?:in|into|for|to)\s+(?:the\s+)?([a-zA-Z0-9_\-\s]+?)(?:\s+field|\s+input|\s+box|\s+area|\s+textbox)?$/i);
+      if (enterInMatch) {
+        const val = cleanValue(enterInMatch[1]);
+        const field = cleanFieldHint(enterInMatch[2]);
+        if (val && field && !isPronounOrReference(field) && !/^(?:the|a|an|to|it|that|this)$/i.test(val)) {
+          return { type: "FILL", fieldHint: field, value: val };
+        }
       }
     }
 
@@ -189,7 +240,7 @@
     if (implicitFillMatch) {
       const field = cleanFieldHint(implicitFillMatch[1]);
       const val = cleanValue(implicitFillMatch[2]);
-      if (field && val && !isPronounOrReference(field) && !/^(?:search|click|press|tap|open|find|go|select|choose|check|uncheck|toggle)$/i.test(field)) {
+      if (field && val && !isPronounOrReference(field) && !/^(?:search|click|press|tap|open|find|go|select|choose|check|uncheck|toggle|reply|compose|send)$/i.test(field) && !/^(?:reply|compose|send|open|go|navigate|click|press)\b/i.test(field)) {
         return { type: "FILL", fieldHint: field, value: val };
       }
     }
@@ -288,6 +339,56 @@
   }
 
   /**
+   * Parses unvalued multi-field entries like "enter my email and password" or "fill name and email".
+   * Produces structured FILL steps using existing action vocabulary with placeholder value "...".
+   * @param {string} clause
+   * @returns {Array<Object>|null}
+   */
+  function parseMultiFieldNoValClause(clause) {
+    if (!clause || typeof clause !== "string") return null;
+    const text = clause.trim().replace(/[.,;!?]+$/, "");
+    const match = text.match(/^(?:fill|enter|type|put)\s+(?:in\s+|into\s+)?(?:(?:the|my|our|your)\s+)?([a-zA-Z0-9_\-]+(?:\s+[a-zA-Z0-9_\-]+)?)\s+(?:and|,)\s+(?:(?:the|my|our|your)\s+)?([a-zA-Z0-9_\-]+(?:\s+[a-zA-Z0-9_\-]+)?)(?:\s+(?:and|,)\s+(?:(?:the|my|our|your)\s+)?([a-zA-Z0-9_\-]+(?:\s+[a-zA-Z0-9_\-]+)?))?$/i);
+    if (!match) return null;
+    if (/\b(?:as|with|value|to|is)\b/i.test(text)) return null;
+    const f1 = cleanFieldHint(match[1]);
+    const f2 = cleanFieldHint(match[2]);
+    const f3 = match[3] ? cleanFieldHint(match[3]) : null;
+    if (!f1 || !f2) return null;
+    const steps = [
+      { type: "FILL", fieldHint: f1, value: "..." },
+      { type: "FILL", fieldHint: f2, value: "..." }
+    ];
+    if (f3) {
+      steps.push({ type: "FILL", fieldHint: f3, value: "..." });
+    }
+    return steps;
+  }
+
+  const ACTION_VERB_PREFIX = '(?:click|press|tap|open|launch|visit|navigate\\s+to|go\\s+to|select|choose|pick|check|uncheck|toggle|tick|untick|enable|disable|turn\\s+on|turn\\s+off|activate|deactivate|fill|enter|type|put|set|write|populate|autofill|complete|search\\s+for|search|find|locate|look\\s+for|look|compose|reply|send|submit|save|download)';
+  const ACTION_CONNECTOR_PATTERN = new RegExp(
+    '(?:' +
+      '(?:,\\s*|;\\s*)(?:and\\s+then|and|then|after\\s+that|next|followed\\s+by|also)?\\s*' +
+      '|\\s+(?:and\\s+then|then|after\\s+that|followed\\s+by|next|also|and)\\s+' +
+    ')(?=' + ACTION_VERB_PREFIX + '\\b)',
+    'i'
+  );
+
+  /**
+   * Action-aware clause segmentation.
+   * Splits multi-step instructions across connectors (and, then, after that, next, followed by, also, and then)
+   * ONLY when followed by a recognized action-introducing pattern.
+   * Preserves inner connectors inside targets/values (e.g. "rock and roll music", "Research and Development").
+   * @param {string} text
+   * @returns {Array<string>}
+   */
+  function splitActionClauses(text) {
+    if (!text || typeof text !== 'string') return [text];
+    const t = text.trim();
+    const parts = t.split(ACTION_CONNECTOR_PATTERN);
+    return parts.map(p => p.trim()).filter(Boolean);
+  }
+
+  /**
    * M23: Resolves active container/section context from a previous step or list of steps.
    * If a step was executed inside a container (e.g. step.context = "filters"), that container
    * remains the enclosing context for subsequent sibling actions.
@@ -319,11 +420,12 @@
   function parseJuxtapositionFill(str) {
     if (!str || typeof str !== "string") return null;
     let s = str.trim();
+    s = s.replace(/^(?:and\s+then|and|then|after\s+that|next|followed\s+by|also)\s+/i, "").trim();
     s = s.replace(/^(?:my|our|your|the|a|an)\s+/i, "").trim();
     if (!s) return null;
 
     // Must not start with action verbs
-    if (/^(?:click|press|tap|open|scroll|select|choose|check|uncheck|toggle|tick|untick|find|locate|search|go|navigate|fill|enter|type|put|set|compose|send|submit)\b/i.test(s)) {
+    if (/^(?:click|press|tap|open|scroll|select|choose|check|uncheck|toggle|tick|untick|enable|disable|turn|activate|deactivate|find|locate|search|look|go|navigate|fill|enter|type|put|set|write|compose|reply|send|submit|save|download|add)\b/i.test(s)) {
       return null;
     }
 
@@ -339,8 +441,9 @@
 
     const parts = s.split(/\s+/);
     if (parts.length < 2) return null;
+    if (/^(?:and|then|after|next|also|followed)$/i.test(parts[0])) return null;
 
-    const actionVerbPattern = /^(?:click|press|tap|open|scroll|select|choose|check|uncheck|toggle|tick|untick|find|locate|search|go|navigate|fill|enter|type|put|set|compose|send|submit)$/i;
+    const actionVerbPattern = /^(?:click|press|tap|open|scroll|select|choose|check|uncheck|toggle|tick|untick|enable|disable|turn|activate|deactivate|find|locate|search|look|go|navigate|fill|enter|type|put|set|write|compose|reply|send|submit|save|download|add)$/i;
 
     // Check for 2-word compound field names where word 2 is a category noun
     const compoundFieldNouns = /^(?:name|number|no|code|id|address|line|date|word|mail)$/i;
@@ -374,7 +477,7 @@
    */
   function parseContextualClause(clause, prevContext = null) {
     if (!clause || typeof clause !== "string") return null;
-    let text = clause.trim().replace(/[.,;!?]+$/, "").replace(/^(?:and\s+then|and|then|after\s+that)\s+/i, "");
+    let text = clause.trim().replace(/[.,;!?]+$/, "").replace(/^(?:and\s+then|and|then|after\s+that|next|followed\s+by|also)\s+/i, "");
     if (!text) return null;
 
     // Reject fill clauses from being misinterpreted as contextual clicks
@@ -407,6 +510,9 @@
     const mRel = rest.match(/^(.+?)\s+\b(inside|within|under|in|from|of)\s+(.+)$/i);
     if (mRel) {
       let targetPart = mRel[1].trim();
+      if (targetPart.includes(',') || targetPart.includes(';') || /\b(?:compose|navigate|open|go\s+to|fill|enter|type|write|search|click|press|tap|submit|send|enable|disable|save|download)\b/i.test(targetPart)) {
+        return null;
+      }
       const relWord = mRel[2].toLowerCase();
       let contextPart = mRel[3].trim();
 
@@ -428,6 +534,7 @@
       if (!/^(?:option|checkbox|toggle|switch|product|item|coupon|button|link)$/i.test(cleanTarget.toLowerCase())) {
         cleanTarget = cleanTarget.replace(/\s+(?:option|checkbox|button|link|toggle|switch)$/i, "").trim();
       }
+      cleanTarget = cleanTarget.replace(/\s+(?:and\s+then|and|then|after\s+that|next|followed\s+by|also)$/i, "").trim();
 
       if (!action) {
         if (targetType === "checkbox") action = "CHECK";
@@ -436,11 +543,15 @@
         else action = "SELECT";
       }
 
+      const attrConstraint = extractAttributeConstraint(cleanTarget);
       return {
         type: action,
         action: action,
         target: cleanTarget,
         targetHint: cleanTarget,
+        objectTarget: attrConstraint ? attrConstraint.objectTarget : null,
+        attribute: attrConstraint ? attrConstraint.attribute : null,
+        attributeValue: attrConstraint ? attrConstraint.attributeValue : null,
         context: contextPart,
         relation: relation,
         ordinal: ordinal !== null ? ordinal : null,
@@ -458,12 +569,17 @@
       if (!/^(?:option|checkbox|toggle|switch|product|item|coupon|button|link)$/i.test(cleanTarget.toLowerCase())) {
         cleanTarget = cleanTarget.replace(/\s+(?:option|checkbox|button|link|toggle|switch)$/i, "").trim();
       }
+      cleanTarget = cleanTarget.replace(/\s+(?:and\s+then|and|then|after\s+that|next|followed\s+by|also)$/i, "").trim();
 
+      const attrConstraint = extractAttributeConstraint(cleanTarget);
       return {
         type: action,
         action: action,
         target: cleanTarget,
         targetHint: cleanTarget,
+        objectTarget: attrConstraint ? attrConstraint.objectTarget : null,
+        attribute: attrConstraint ? attrConstraint.attribute : null,
+        attributeValue: attrConstraint ? attrConstraint.attributeValue : null,
         context: prevContext || null,
         relation: prevContext ? "inside" : null,
         ordinal: ordinal !== null ? ordinal : null,
@@ -476,11 +592,15 @@
     if (ordinal !== null && (action === "CLICK" || !action)) {
       let targetPart = rest.replace(/^(?:the|a|an)\s+/i, "").trim();
       const targetType = extractTargetType(targetPart) || "generic";
+      const attrConstraint = extractAttributeConstraint(targetPart);
       return {
         type: "CLICK",
         action: "CLICK",
         target: targetPart,
         targetHint: targetPart,
+        objectTarget: attrConstraint ? attrConstraint.objectTarget : null,
+        attribute: attrConstraint ? attrConstraint.attribute : null,
+        attributeValue: attrConstraint ? attrConstraint.attributeValue : null,
         context: prevContext || null,
         relation: prevContext ? "inside" : null,
         ordinal: ordinal,
@@ -491,6 +611,57 @@
     return null;
   }
 
+  /**
+   * Generic attribute extraction layer for descriptive targets.
+   * Recognizes color constraints and decomposes targets into:
+   * objectTarget, attribute, attributeValue.
+   *
+   * @param {string} text
+   * @returns {{ objectTarget: string, attribute: string, attributeValue: string, normalizedTarget: string } | null}
+   */
+  function extractAttributeConstraint(text) {
+    if (!text || typeof text !== "string") return null;
+    let s = text.trim().replace(/[.,;!?]+$/, "");
+    s = s.replace(/^(?:the|a|an)\s+/i, "").trim();
+    // Strip leading ordinal if present (e.g. "first black earbuds", "second red shoes")
+    s = s.replace(/^(?:first|second|third|1st|2nd|3rd|last)\s+/i, "").trim();
+
+    const colorPattern = "\\b(black|white|red|blue|green|yellow|orange|purple|pink|brown|gray|grey|silver|gold)\\b";
+
+    // Pattern 1: "<color> [color/colour/colored/coloured] <object>" (e.g. "black colour earbuds", "black earbuds", "white shoes")
+    const p1Regex = new RegExp(`^${colorPattern}(?:[\\s\\-]+(?:colour|color|colored|coloured))?\\s+(.+)$`, "i");
+    const m1 = s.match(p1Regex);
+    if (m1) {
+      const colorVal = m1[1].toLowerCase();
+      let obj = m1[2].trim().replace(/^(?:the|a|an)\s+/i, "").trim();
+      if (obj && !isPronounOrReference(obj)) {
+        return {
+          objectTarget: obj,
+          attribute: "color",
+          attributeValue: colorVal,
+          normalizedTarget: `${colorVal} ${obj}`
+        };
+      }
+    }
+
+    // Pattern 2: "<object> in/with [the] <color> [color/colour]" (e.g. "earbuds in black", "shoes with white colour")
+    const p2Regex = new RegExp(`^(.+?)\\s+(?:in|with)\\s+(?:the\\s+)?${colorPattern}(?:[\\s\\-]+(?:colour|color|colored|coloured))?$`, "i");
+    const m2 = s.match(p2Regex);
+    if (m2) {
+      let obj = m2[1].trim().replace(/^(?:the|a|an)\s+/i, "").trim();
+      const colorVal = m2[2].toLowerCase();
+      if (obj && !isPronounOrReference(obj)) {
+        return {
+          objectTarget: obj,
+          attribute: "color",
+          attributeValue: colorVal,
+          normalizedTarget: `${colorVal} ${obj}`
+        };
+      }
+    }
+
+    return null;
+  }
 
   /**
    * Normalizes natural language idioms, connectors, and pronoun references in task text.
@@ -504,36 +675,35 @@
     let text = normalizeText(rawTask);
     if (!text) return "";
 
-    // 0a. Normalize "find/locate/go to [the] <FIELD> [field/input/box/area/textbox] and/then fill/enter/type/put [in/into] it with/as/to/:/= <VAL>"
+    // 0a. Normalize "find/locate/go to [the] <FIELD> [field/input/box/area/textbox] and/then enter/type/fill/put/set/write <VAL>"
+    // or "... and enter/fill ... with/to/as/:/= <VAL>" or "... enter <VAL> in/into it"
     // -> "fill <FIELD> with <VAL>"
     text = text.replace(
-      /\b(?:find|locate|go\s+to)\s+(?:the\s+)?((?:(?!\b(?:and|then|fill|enter|type|put)\b)[a-zA-Z0-9_\-\s])+?)(?:\s+(?:field|input|box|area|textbox))?\s*(?:,\s*(?:and\s+then\s+|and\s+|then\s+)?|\s+(?:and\s+then\s+|and\s+|then\s+))(?:fill|enter|type|put)\s+(?:in\s+|into\s+)?(?:it|that|this|the\s+field|the\s+input|the\s+box)?\s*(?:with|to|as|value|is|:=|=)\s+/gi,
-      (match, field) => {
-        const cleanField = cleanFieldHint(field);
-        return `fill ${cleanField} with `;
-      }
-    );
-
-    // 0b. Normalize "find/locate/go to [the] <FIELD> [field/input/box/area/textbox] and/then enter/type/put <VAL> in/into it"
-    // -> "fill <FIELD> with <VAL>"
-    text = text.replace(
-      /\b(?:find|locate|go\s+to)\s+(?:the\s+)?((?:(?!\b(?:and|then|fill|enter|type|put)\b)[a-zA-Z0-9_\-\s])+?)(?:\s+(?:field|input|box|area|textbox))?\s*(?:,\s*(?:and\s+then\s+|and\s+|then\s+)?|\s+(?:and\s+then\s+|and\s+|then\s+))(?:enter|type|put)\s+(.+?)\s+(?:in|into)\s+(?:it|that|this|the\s+field|the\s+input|the\s+box)\b/gi,
+      /\b(?:find|locate|go\s+to)\s+(?:the\s+)?([a-zA-Z0-9_\-\s]+?)(?:\s+(?:field|input|box|area|textbox))?\s*(?:,\s*(?:and\s+then|and|then)\s*|\s+(?:and\s+then|and|then)\s+)(?:enter|fill|type|put|set|write)(?:\s+(?:(?:in|into)\s+)?(?:it|that|this|the\s+field|the\s+input|the\s+box))?\s*(?:(?:with|to|as|value|is|:=|=)\s+)?(.+?)(?:\s+(?:in|into)\s+(?:it|that|this|the\s+field|the\s+input|the\s+box))?(?=\s*[,;.]|\s+(?:and\s+then|and|then)\b|$)/gi,
       (match, field, val) => {
-        const cleanField = cleanFieldHint(field);
-        return `fill ${cleanField} with ${val.trim()}`;
+        const cleanF = cleanFieldHint(field);
+        if (/\b(?:form|section|modal|dialog|page|card|panel)\b/i.test(cleanF)) return match;
+        if (/\b(?:and|,)\b\s*(?:(?:my|the|your|our)\s+)?(?:email|password|username|name|phone|address)\b/i.test(val)) return match;
+        return `fill ${cleanF} with ${val.trim()}`;
       }
     );
 
-    // 1. Normalize "find/locate/search for/look for [the] <TARGET> and/then/and then click/press/tap/select/use/open it/that/this/them/that button/that link/the above"
+    // 1. Normalize "find/locate/search for/look for [the] <TARGET> and/then/and then click/press/tap/select/use/open/download it/that/this/them/that button/that link/the above"
     // -> "<verb> [the] <TARGET>"
     text = text.replace(
-      /\b(?:find|locate|search\s+for|look\s+for)\s+(?:the\s+)?((?:(?!\b(?:and|then)\b)[a-zA-Z0-9_\-\s])+?)\s*(?:,\s*(?:and\s+then\s+|and\s+|then\s+)?|\s+(?:and\s+then\s+|and\s+|then\s+))(click|press|tap|select|use|open)\s+(?:on\s+)?(?:it|that|this|them|that\s+button|this\s+button|that\s+link|this\s+link|the\s+above|above|the\s+field|that\s+field|this\s+field)\b/gi,
+      /\b(?:find|locate|search\s+for|look\s+for)\s+(?:the\s+)?((?:(?!\b(?:and|then)\b)[a-zA-Z0-9_\-\s])+?)\s*(?:,\s*(?:and\s+then\s+|and\s+|then\s+)?|\s+(?:and\s+then\s+|and\s+|then\s+))(click|press|tap|select|use|open|download)\s+(?:on\s+)?(?:it|that|this|them|that\s+button|this\s+button|that\s+link|this\s+link|the\s+above|above|the\s+field|that\s+field|this\s+field)\b/gi,
       (match, target, verb) => {
         const cleanTarget = target.trim();
         const v = (verb || "").toLowerCase();
-        const act = (v === "select" ? "select" : (v === "open" ? "open" : "click"));
+        const act = (v === "select" ? "select" : (v === "open" ? "open" : (v === "download" ? "download" : "click")));
         return `${act} ${cleanTarget}`;
       }
+    );
+
+    // 1b. Normalize "find/locate/search for/look for [the] <TARGET> and turn it on/enable it" -> "enable [the] <TARGET>"
+    text = text.replace(
+      /\b(?:find|locate|search\s+for|look\s+for)\s+(?:the\s+)?((?:(?!\b(?:and|then)\b)[a-zA-Z0-9_\-\s])+?)\s*(?:,\s*(?:and\s+then\s+|and\s+|then\s+)?|\s+(?:and\s+then\s+|and\s+|then\s+))(?:turn\s+(?:it|this|that)\s+on|enable\s+(?:it|this|that)|activate\s+(?:it|this|that))\b/gi,
+      (match, target) => `enable ${target.trim()}`
     );
 
     // 2. Normalize "find/locate/search for/look for [the] <TARGET> button/link and/then click/press/tap/select/use/open it/that/that link/the above"
@@ -579,6 +749,228 @@
   }
 
   /**
+   * Extracts user execution constraints and stop conditions from natural-language task text.
+   * Ensures control directives (e.g. "do not send", "stop after filling", "ask for confirmation")
+   * are cleanly isolated as execution constraints and never confused with DOM targets or values.
+   *
+   * @param {string} text
+   * @returns {{ constraints: Array<string>, stopCondition: string|null, approvalRequirement: string|null, requireApprovalBeforeSend: boolean, doNotSend: boolean }}
+   */
+  function extractExecutionConstraints(text) {
+    if (!text || typeof text !== "string") {
+      return {
+        constraints: [],
+        stopCondition: null,
+        approvalRequirement: null,
+        requireApprovalBeforeSend: false,
+        doNotSend: false
+      };
+    }
+    const constraints = [];
+    let stopCondition = null;
+    let approvalRequirement = null;
+    let requireApprovalBeforeSend = false;
+    let doNotSend = false;
+
+    const lower = text.toLowerCase();
+
+    // Check for do not send / don't send / don't click send
+    if (/\b(?:do\s+not\s+send(?:\s+it)?|don'?t\s+(?:click\s+)?send(?:\s+it)?|never\s+send)\b/i.test(lower)) {
+      constraints.push("DO_NOT_SEND");
+      doNotSend = true;
+    }
+
+    // Check for stop after filling / stop before sending
+    if (/\b(?:stop\s+after\s+filling(?:\s+the\s+reply)?|stop\s+before\s+sending|pause\s+after\s+filling|halt\s+after\s+filling)\b/i.test(lower)) {
+      constraints.push("STOP_AFTER_FILLING");
+      stopCondition = "AFTER_FILL";
+    }
+
+    // Check for confirmation / approval
+    if (/\b(?:ask\s+for\s+confirmation|require\s+confirmation|confirmation\s+first|only\s+send\s+after\s+approval|wait\s+for\s+approval|require\s+approval|need\s+approval|approval\s+before\s+send(?:ing)?)\b/i.test(lower)) {
+      constraints.push("REQUIRE_APPROVAL_BEFORE_SEND");
+      requireApprovalBeforeSend = true;
+      approvalRequirement = "HUMAN_CONFIRMATION_BEFORE_SEND";
+    }
+
+    return {
+      constraints,
+      stopCondition,
+      approvalRequirement,
+      requireApprovalBeforeSend,
+      doNotSend
+    };
+  }
+
+  /**
+   * Strips execution control directives from natural-language task text.
+   * Keeps pure actionable steps and values intact.
+   *
+   * @param {string} text
+   * @returns {string}
+   */
+  function stripExecutionControlPhrases(text) {
+    if (!text || typeof text !== "string") return "";
+    let s = text;
+    // Strip control phrases cleanly:
+    // 1. "stop after filling [the reply]", "stop before sending", etc.
+    s = s.replace(/(?:,\s*|\s+)?(?:\b(?:and\s+then|and|then|also)\b\s*)?\b(?:stop\s+after\s+filling(?:\s+the\s+reply)?|stop\s+before\s+sending|pause\s+after\s+filling|halt\s+after\s+filling)\b[.,;!?]?/gi, " ");
+    // 2. "do not send [it]", "don't send [it]", "don't click send", "never send", etc.
+    s = s.replace(/(?:,\s*|\s+)?(?:\b(?:and\s+then|and|then|also)\b\s*)?\b(?:do\s+not\s+send(?:\s+it)?|don'?t\s+(?:click\s+)?send(?:\s+it)?|never\s+send)\b[.,;!?]?/gi, " ");
+    // 3. "ask for confirmation [before sending]", "require confirmation", "confirmation first", etc.
+    s = s.replace(/(?:,\s*|\s+)?(?:\b(?:and\s+then|and|then|also)\b\s*)?\b(?:ask\s+for\s+confirmation(?:\s+before\s+sending)?|require\s+confirmation(?:\s+before\s+sending)?|confirmation\s+first|only\s+send\s+after\s+approval|wait\s+for\s+approval|require\s+approval(?:\s+before\s+sending)?|approval\s+before\s+send(?:ing)?)\b[.,;!?]?/gi, " ");
+    return s.replace(/\s+/g, " ").trim().replace(/[.,;!?]+$/, "").trim();
+  }
+
+  /**
+   * Parses email / message reply workflows into multi-step semantic actions.
+   * Produces:
+   * STEP 1: CLICK -> Reply (expectedRole: button, semanticTarget: Reply)
+   * STEP 2: FILL -> Reply message body (expectedRole: textarea/contenteditable, value: replyText)
+   * Optional STEP 3 (if requireApprovalBeforeSend): CLICK -> Send (requiresApproval: true, expectedRole: button)
+   *
+   * @param {string} text
+   * @param {Object} [constraints]
+   * @returns {Array<Object>|null}
+   */
+  function parseReplyWorkflow(text, constraints) {
+    if (!text || typeof text !== "string") return null;
+    const t = text.trim();
+
+    // 1. Reply with explicit value:
+    // e.g. "Reply to the currently open email with: ...", "Reply to the open email with Hello", "Reply to this email with ...", "Reply with ..."
+    const replyWithMatch = t.match(/^reply(?:\s+(?:to\s+)?(?:the\s+)?(?:currently\s+)?(?:open\s+)?(?:this\s+)?(?:email|mail|message))?\s*(?:with\s*[:\s]+|:\s*)(.+)$/i);
+    if (replyWithMatch) {
+      let replyBody = replyWithMatch[1].trim();
+      replyBody = cleanValue(replyBody);
+      if (!replyBody) replyBody = "...";
+
+      const steps = [
+        {
+          type: "CLICK",
+          targetHint: "Reply",
+          target: "Reply",
+          expectedRole: "button",
+          role: "button",
+          semanticTarget: "Reply",
+          legacyTarget: null
+        },
+        {
+          type: "FILL",
+          fieldHint: "Reply message body",
+          expectedRole: "textarea/contenteditable",
+          role: "textarea/contenteditable",
+          semanticTarget: "Reply message body",
+          value: replyBody
+        }
+      ];
+
+      if (constraints && constraints.requireApprovalBeforeSend) {
+        steps.push({
+          type: "CLICK",
+          targetHint: "Send",
+          target: "Send",
+          expectedRole: "button",
+          role: "button",
+          semanticTarget: "Send",
+          requiresApproval: true,
+          risk: "HIGH",
+          riskLevel: "HIGH",
+          legacyTarget: resolveLegacyClickTarget("Send")
+        });
+      }
+
+      return steps;
+    }
+
+    // 2. Standalone reply intent without explicit body value:
+    // e.g. "Reply to the currently open email", "Reply to this email", "Reply to email"
+    const standaloneReplyMatch = t.match(/^reply(?:\s+(?:to\s+)?(?:the\s+)?(?:currently\s+)?(?:open\s+)?(?:this\s+)?(?:email|mail|message))?$/i);
+    if (standaloneReplyMatch) {
+      const steps = [
+        {
+          type: "CLICK",
+          targetHint: "Reply",
+          target: "Reply",
+          expectedRole: "button",
+          role: "button",
+          semanticTarget: "Reply",
+          legacyTarget: null
+        }
+      ];
+      if (constraints && constraints.requireApprovalBeforeSend) {
+        steps.push({
+          type: "CLICK",
+          targetHint: "Send",
+          target: "Send",
+          expectedRole: "button",
+          role: "button",
+          semanticTarget: "Send",
+          requiresApproval: true,
+          risk: "HIGH",
+          riskLevel: "HIGH",
+          legacyTarget: resolveLegacyClickTarget("Send")
+        });
+      }
+      return steps;
+    }
+
+    return null;
+  }
+
+  /**
+   * Section 3b: Recognizes platform-targeted search workflows:
+   * e.g. "Search Gmail for emails about SIH." ->
+   * STEP 1: FILL -> Search mail (value: "emails about SIH")
+   * STEP 2: SUBMIT -> Search mail (query: "emails about SIH")
+   *
+   * @param {string} rawTask
+   * @returns {Array<Object>|null}
+   */
+  function parsePlatformSearchWorkflow(rawTask) {
+    if (!rawTask || typeof rawTask !== "string") return null;
+    const text = (rawTask || "").trim().replace(/[.!?]+$/, "");
+    if (!text) return null;
+
+    // Pattern: "Search <Platform> for <query>"
+    const m = text.match(/^search\s+([a-zA-Z0-9_\-]+)\s+for\s+(.+)$/i);
+    if (m) {
+      const platform = m[1].trim();
+      const query = cleanValue(m[2].trim());
+      if (/^(?:the|a|an|all|my|this|that|in|on|at|for)$/i.test(platform)) return null;
+
+      const pLower = platform.toLowerCase();
+      let searchTarget = "search";
+      if (pLower === "gmail") {
+        searchTarget = "Search mail";
+      } else if (pLower === "youtube") {
+        searchTarget = "search";
+      } else if (pLower === "amazon") {
+        searchTarget = "search";
+      }
+
+      return [
+        {
+          type: "FILL",
+          fieldHint: searchTarget,
+          semanticTarget: searchTarget,
+          expectedRole: "input",
+          role: "input",
+          value: query
+        },
+        {
+          type: "SUBMIT",
+          targetHint: searchTarget,
+          semanticTarget: searchTarget,
+          query: query
+        }
+      ];
+    }
+
+    return null;
+  }
+
+  /**
    * Section 3: Recognizes generic multi-stage search workflows.
    * Generic across all search engines and content portals without site-specific rules.
    *
@@ -590,11 +982,11 @@
     if (!text) return null;
 
     // 0. Optional navigation prefix: e.g. "Open YouTube, search for...", "Go to Amazon and search for..."
-    const navPrefixMatch = text.match(/^(?:open|go\s+to|navigate\s+to|launch|visit)\s+(?:the\s+)?([a-zA-Z0-9_\-]+(?:\s+[a-zA-Z0-9_\-]+)?)\s*(?:,\s*|\s+)(?:and\s+)?(?:then\s+)?(?=search\b)/i);
+    const navPrefixMatch = text.match(/^(?:open|go\s+to|navigate\s+to|launch|visit)\s+(?:the\s+)?((?:(?!\b(?:and|then|after\s+that|next|followed\s+by|also)\b)[a-zA-Z0-9_\-])+(?:\s+(?!\b(?:and|then|after\s+that|next|followed\s+by|also)\b)[a-zA-Z0-9_\-]+)*)\s*(?:,\s*|\s+)?(?:\b(?:and\s+then|and|then|after\s+that|next|followed\s+by|also)\b\s*)?(?=search\b)/i);
     let navTarget = null;
     let searchTaskText = text;
     if (navPrefixMatch) {
-      navTarget = navPrefixMatch[1].trim();
+      navTarget = navPrefixMatch[1].trim().replace(/\s+(?:and\s+then|and|then|after\s+that|next|followed\s+by|also)$/i, "").trim();
       searchTaskText = text.substring(navPrefixMatch[0].length).trim();
     }
 
@@ -624,10 +1016,10 @@
     } else {
       // B. Post-search action with named or generic target:
       // "search OpenAI and select XYZ", "search OpenAI and choose XYZ", "search OpenAI and open XYZ", "search OpenAI and open the most relevant result"
-      const postSearchActionMatch = searchTaskText.match(/(?:,\s*|\s+)(?:and\s+then|and|then)?\s*(?:identify|find|select|choose|open|click|visit|view)\s+(?:on\s+)?(?:the\s+)?([^,;]+?)(?:\s*[,;.]|\s+(?:and\s+then|and|then)\s+(?:find|locate|click|press|tap|play|add)|$)/i);
+      const postSearchActionMatch = searchTaskText.match(/(?:,\s*|\s+)(?:\b(?:and\s+then|and|then|after\s+that|next|followed\s+by|also)\b\s*)?(?:identify|find|select|choose|open|click|visit|view|launch|pick|tap|press)\s+(?:on\s+)?(?:the\s+)?([^,;]+?)(?:\s*[,;.]|\s+(?:and\s+then|and|then|after\s+that|next|followed\s+by|also)\s+(?:find|locate|click|press|tap|play|add)|$)/i);
       if (postSearchActionMatch) {
         const candidate = postSearchActionMatch[1].trim();
-        const isGeneric = /^(?:(?:most\s+relevant|actual|first|top|selected|chosen|official|main|verified|primary)\s+)*(?:product|result|item|listing|video|movie|article|song|track|stream|content|website|site|webpage|page|link|portal|entry|it|that|this|them)$/i.test(candidate);
+        const isGeneric = /^(?:(?:most\s+relevant|relevant|actual|first|second|third|top|selected|chosen|official|main|verified|primary)\s+)*(?:product|result|item|listing|video|movie|article|song|track|stream|content|website|site|webpage|page|link|portal|entry|it|that|this|them)$/i.test(candidate);
         if (!isGeneric) {
           explicitTarget = candidate;
           isExplicitTarget = true;
@@ -636,7 +1028,7 @@
           productTarget = explicitTarget;
         } else {
           const isPronoun = /^(?:it|that|this|them)$/i.test(candidate);
-          isMostRelevant = /\bmost\s+relevant\b/i.test(candidate) || isPronoun;
+          isMostRelevant = /\b(?:most\s+relevant|relevant)\b/i.test(candidate) || isPronoun;
           isExplicitTarget = false;
           hasProductOpen = true;
           productTarget = isPronoun ? "most relevant result" : candidate;
@@ -679,14 +1071,18 @@
     // Step 0: Initial navigation step if specified (e.g. "Open YouTube")
     if (navTarget) {
       steps.push({
-        type: "CLICK",
+        type: "NAVIGATE",
+        action: "NAVIGATE",
         targetHint: navTarget,
+        target: navTarget,
+        url: resolveNavigationUrl(navTarget),
+        isNavigation: true,
         legacyTarget: null
       });
     }
 
-    // Step 1: Explicit search input locator if task starts with finding/locating search box AND has subsequent product selection
-    if (hasSearchBoxPrefix && hasProductOpen) {
+    // Step 1: Explicit search input locator if task starts with finding/locating search box and involves subsequent actions
+    if (hasSearchBoxPrefix && (hasProductOpen || trailingTarget)) {
       steps.push({
         type: "CLICK",
         targetHint: "search box",
@@ -734,16 +1130,19 @@
     return steps.length > 0 ? steps : null;
   }
 
+  let currentActiveConstraints = null;
+
   /**
    * Parses free-text user task into structured local intent.
    * Deterministic, bounded rule-based parser (no LLM, no external network).
    *
    * @param {string} rawTask
+   * @param {boolean} [isSubCall=false]
    * @returns {Object} Structured intent with sanitized plan and private local values
    */
-  function parseTask(rawTask) {
+  function parseTask(rawTask, isSubCall = false) {
     if (!rawTask || !rawTask.trim()) {
-      return createNoneResult("Empty task");
+      return createNoneResult("Empty task", !isSubCall ? currentActiveConstraints : null);
     }
 
     // Strip trailing verification assertions if present (e.g. ", and verify that the email was sent")
@@ -752,15 +1151,46 @@
       ""
     );
 
+    // CRITICAL FIX: Extract user execution constraints and stop conditions FIRST
+    let executionConstraints;
+    if (!isSubCall) {
+      executionConstraints = extractExecutionConstraints(cleanRawTask);
+      currentActiveConstraints = executionConstraints;
+    } else {
+      executionConstraints = currentActiveConstraints || {
+        constraints: [],
+        stopCondition: null,
+        approvalRequirement: null,
+        requireApprovalBeforeSend: false,
+        doNotSend: false
+      };
+    }
+
+    const taskWithoutControls = executionConstraints.constraints.length > 0
+      ? stripExecutionControlPhrases(cleanRawTask)
+      : cleanRawTask;
+
+    // 0. Platform search workflow: e.g. "Search Gmail for emails about SIH."
+    const platformSearchSteps = parsePlatformSearchWorkflow(taskWithoutControls);
+    if (platformSearchSteps && platformSearchSteps.length > 0) {
+      return buildResultFromSteps(platformSearchSteps, executionConstraints);
+    }
+
+    // 0b. Reply workflow: e.g. "Reply to the currently open email with: ... Stop after filling the reply. Do not send it."
+    const replySteps = parseReplyWorkflow(taskWithoutControls, executionConstraints);
+    if (replySteps && replySteps.length > 0) {
+      return buildResultFromSteps(replySteps, executionConstraints);
+    }
+
     // Section 3: Recognize generic search workflows & multi-stage workflow check:
     // If the task contains sequential workflow stages across search or interactive actions,
     // split at the result selection boundary and parse each stage.
     const multiStageSplitPattern = /(?<=(?:open|click|select|view)\s+(?:on\s+)?(?:the\s+)?(?:(?:most\s+relevant|actual|first|top|selected|chosen|official|main|verified|primary)\s+)*(?:[a-zA-Z0-9_\-]+\s+)?(?:product|result|item|listing|video|movie|article|song|track|stream|content|website|site|webpage|page|link|portal|entry|it|that|them)|(?:submit\s+search|submit))\s*(?:,\s*(?:then|and\s+then|and)?|\s+(?:then|and\s+then|and)|\s*;\s*(?:then)?|\.\s*|\s+after\s+opening\s+[^,;]+,?\s*)\s*(?=(?:(?:find|locate|go\s+to|click)\s+(?:on\s+)?(?:the\s+)?(?:[a-zA-Z0-9_\-]+\s+)?(?:search\s+(?:box|input|field|bar|area)|search)\b|search\b|compose\b|enter\b|type\b|fill\b|send\b|write\b))/i;
 
-    let stageParts = cleanRawTask.split(multiStageSplitPattern);
+    let stageParts = taskWithoutControls.split(multiStageSplitPattern);
     if (stageParts.length <= 1) {
       const legacyPattern = /(?:,\s*then|\s+then|\s*;\s*then|\s*,\s*and\s+then|\s+and\s+then|\s+after\s+opening\s+(?:it|the\s+result|the\s+product|that|the\s+video|the\s+item))\s+(?=(?:find|locate|go\s+to|click|search|on\b|in\b))/i;
-      const legacyParts = cleanRawTask.split(legacyPattern);
+      const legacyParts = taskWithoutControls.split(legacyPattern);
       if (legacyParts.length > 1 && legacyParts.every((p) => /\bsearch\b/i.test(p))) {
         stageParts = legacyParts;
       }
@@ -775,7 +1205,7 @@
         if (stageWorkflow && stageWorkflow.length > 0) {
           combinedSteps = combinedSteps.concat(stageWorkflow);
         } else {
-          const subRes = parseTask(trimmedPart);
+          const subRes = parseTask(trimmedPart, true);
           if (subRes.intent !== "NONE" && Array.isArray(subRes.steps) && subRes.steps.length > 0 && subRes.steps[0].type !== "NONE") {
             combinedSteps = combinedSteps.concat(subRes.steps);
           } else {
@@ -785,30 +1215,70 @@
         }
       }
       if (allValid && combinedSteps.length > 0) {
-        return buildResultFromSteps(combinedSteps);
+        return buildResultFromSteps(combinedSteps, executionConstraints);
       }
     }
 
-    const searchWorkflowSteps = parseSearchWorkflow(cleanRawTask);
+    const searchWorkflowSteps = parseSearchWorkflow(taskWithoutControls);
     if (searchWorkflowSteps && searchWorkflowSteps.length > 0) {
-      return buildResultFromSteps(searchWorkflowSteps);
+      return buildResultFromSteps(searchWorkflowSteps, executionConstraints);
     }
 
-    const task = normalizeTaskPhrasing(cleanRawTask);
+    const task = normalizeTaskPhrasing(taskWithoutControls);
     if (!task) {
-      return createNoneResult("Empty task");
+      return createNoneResult("Empty task", executionConstraints);
     }
 
     const lower = task.toLowerCase();
 
-    // 1. Check for sequential clauses: e.g. "..., then ...", "... and then ...", "... then ..."
-    const sequentialSplit = task.split(/\s*(?:,\s*then|\s+then|\s*;\s*then|\s*,\s*and\s+then|\s+and\s+then)\s+/i);
-    if (sequentialSplit.length > 1) {
+    // 0c. Whole form filling with profile: "fill the form", "autofill form", "fill all details", "fill my details", "fill form simultaneously", "fill this form with my details"
+    const wholeFormMatch = task.match(/^(?:fill|autofill|complete|populate)\s+(?:in\s+|out\s+)?(?:the\s+|this\s+|all\s+|my\s+|out\s+the\s+)?(?:form|details|fields|profile|information|registration\s+form|contact\s+form|simple\s+form)(?:\s+with\s+(?:my\s+|all\s+)?(?:details|information|profile|data))?(?:\s+simultaneously|\s+all\s+at\s+once)?$/i);
+    if (wholeFormMatch) {
+      return buildResultFromSteps([
+        {
+          type: "FILL_FORM",
+          fieldHint: "all form fields",
+          profileSource: "form-profile.json",
+          simultaneous: true
+        }
+      ]);
+    }
+
+    // 0d. Whole form fill then click: "fill the form, then click submit", "fill form and submit", "fill this form with my details and submit it"
+    const wholeFormThenClickMatch = task.match(/^(?:fill|autofill|complete|populate)\s+(?:in\s+|out\s+)?(?:the\s+|this\s+|all\s+|my\s+|out\s+the\s+)?(?:form|details|fields|profile|information|registration\s+form|contact\s+form|simple\s+form)(?:\s+with\s+(?:my\s+|all\s+)?(?:details|information|profile|data))?\s*(?:,\s*then|\s+then|\s*;\s*then|\s*,\s*and\s+then|\s+and\s+then|\s+and)\s+(?:click|press|tap|submit|send)\s+(?:on\s+)?(?:the\s+)?([a-z0-9_\-\s]+?)(?:\s+button)?$/i);
+    if (wholeFormThenClickMatch) {
+      let clickTarget = wholeFormThenClickMatch[1].trim();
+      if (/^(?:it|this|that|them)$/i.test(clickTarget) || wholeFormThenClickMatch[0].toLowerCase().includes("submit")) {
+        clickTarget = "submit";
+      }
+      return buildResultFromSteps([
+        {
+          type: "FILL_FORM",
+          fieldHint: "all form fields",
+          profileSource: "form-profile.json",
+          simultaneous: true
+        },
+        {
+          type: "CLICK",
+          targetHint: clickTarget,
+          legacyTarget: resolveLegacyClickTarget(clickTarget)
+        }
+      ]);
+    }
+
+    // 1. Action-Aware Clause Splitting: [action] [target] [connector] [action] [target]
+    // Handles connectors: and, then, after that, next, followed by, also, and then
+    const actionClauses = splitActionClauses(task);
+    const candidateSplit = actionClauses.length > 1
+      ? actionClauses
+      : task.split(/\s*(?:,\s*then|\s+then|\s*;\s*then|\s*,\s*and\s+then|\s+and\s+then)\s+/i);
+
+    if (candidateSplit.length > 1) {
       const parsedSeqSteps = [];
       let currentContext = null;
       let allValid = true;
 
-      for (const part of sequentialSplit) {
+      for (const part of candidateSplit) {
         const trimmedPart = part.trim();
         if (isPronounOrReference(trimmedPart) || /^(?:click|press|tap|select|use)\s+(?:on\s+)?(?:it|this|that|them|that\s+button|this\s+button|that\s+link|this\s+link|the\s+above|above|the\s+field|that\s+field|this\s+field|the\s+button|button|the\s+link|link)$/i.test(trimmedPart)) {
           if (parsedSeqSteps.length > 0) {
@@ -819,7 +1289,13 @@
           }
         }
 
-        const fill = parseFillClause(trimmedPart);
+        const multiFillNoVal = parseMultiFieldNoValClause(trimmedPart);
+        if (multiFillNoVal) {
+          parsedSeqSteps.push(...multiFillNoVal);
+          continue;
+        }
+
+        const fill = parseFillClause(trimmedPart) || parseJuxtapositionFill(trimmedPart);
         if (fill) {
           parsedSeqSteps.push(fill);
         } else {
@@ -831,7 +1307,7 @@
               currentContext = activeCtx;
             }
           } else {
-            const subRes = parseTask(trimmedPart);
+            const subRes = parseTask(trimmedPart, true);
             if (subRes.intent !== "NONE" && Array.isArray(subRes.steps) && subRes.steps.length > 0 && subRes.steps[0].type !== "NONE") {
               parsedSeqSteps.push(...subRes.steps);
               const last = subRes.steps[subRes.steps.length - 1];
@@ -846,6 +1322,22 @@
       }
 
       if (allValid && parsedSeqSteps.length > 0) {
+        // If a NAVIGATE step is followed by steps that use that step's target as hierarchical context,
+        // then that step was clicking/opening a DOM container on the page.
+        parsedSeqSteps.forEach((step, sIdx) => {
+          if (step.type === "NAVIGATE" && (step.targetHint || step.target)) {
+            const targetNorm = (step.targetHint || step.target).toLowerCase();
+            const hasContextualChild = parsedSeqSteps.slice(sIdx + 1).some(
+              (nxt) => nxt.context && nxt.context.toLowerCase() === targetNorm
+            );
+            if (hasContextualChild) {
+              step.type = "CLICK";
+              step.action = "CLICK";
+              delete step.url;
+              delete step.isNavigation;
+            }
+          }
+        });
         return buildResultFromSteps(parsedSeqSteps);
       }
     }
@@ -883,38 +1375,6 @@
         }
         return buildResultFromSteps(parsedFormSteps);
       }
-    }
-
-    // 2. Whole form filling with profile: "fill the form", "autofill form", "fill all details", "fill my details", "fill form simultaneously"
-    const wholeFormMatch = task.match(/^(?:fill|autofill|complete|populate)\s+(?:in\s+|out\s+)?(?:the\s+|this\s+|all\s+|my\s+|out\s+the\s+)?(?:form|details|fields|profile|information|registration\s+form|contact\s+form|simple\s+form)(?:\s+simultaneously|\s+all\s+at\s+once)?$/i);
-    if (wholeFormMatch) {
-      return buildResultFromSteps([
-        {
-          type: "FILL_FORM",
-          fieldHint: "all form fields",
-          profileSource: "form-profile.json",
-          simultaneous: true
-        }
-      ]);
-    }
-
-    // 2b. Whole form fill then click: "fill the form, then click submit", "fill form and submit"
-    const wholeFormThenClickMatch = task.match(/^(?:fill|autofill|complete)\s+(?:in\s+|out\s+)?(?:the\s+|this\s+|all\s+|my\s+|out\s+the\s+)?(?:form|details|fields|profile|information)\s*(?:,\s*then|\s+then|\s*;\s*then|\s*,\s*and\s+then|\s+and\s+then|\s+and)\s+(?:click|press|tap|submit|send)\s+(?:on\s+)?(?:the\s+)?([a-z0-9_\-\s]+?)(?:\s+button)?$/i);
-    if (wholeFormThenClickMatch) {
-      const clickTarget = wholeFormThenClickMatch[1].trim();
-      return buildResultFromSteps([
-        {
-          type: "FILL_FORM",
-          fieldHint: "all form fields",
-          profileSource: "form-profile.json",
-          simultaneous: true
-        },
-        {
-          type: "CLICK",
-          targetHint: clickTarget,
-          legacyTarget: resolveLegacyClickTarget(clickTarget)
-        }
-      ]);
     }
 
     // 2c. Sequential FILL without values: "Fill the name and email, then click submit"
@@ -980,7 +1440,7 @@
           if (contextualStep) {
             parsedClauses.push(contextualStep);
           } else {
-            const subTaskRes = parseTask(trimmedClause);
+            const subTaskRes = parseTask(trimmedClause, true);
             if (subTaskRes.intent !== "NONE" && Array.isArray(subTaskRes.steps) && subTaskRes.steps.length > 0 && subTaskRes.steps[0].type !== "NONE") {
               parsedClauses.push(...subTaskRes.steps);
             } else {
@@ -1057,7 +1517,7 @@
     // 6a. Explicitly labelled/named: "click the button labelled Register", "press link named Register"
     const labelledBtnMatch = task.match(/^(?:click|press|tap)\s+(?:on\s+)?(?:the\s+)?(?:button|link)\s+(?:labelled|labeled|named|with\s+text)\s+['"]?([a-zA-Z0-9_\-\s]+?)['"]?$/i);
     if (labelledBtnMatch) {
-      const targetHint = labelledBtnMatch[1].trim();
+      const targetHint = labelledBtnMatch[1].trim().replace(/\s+(?:and\s+then|and|then|after\s+that|next|followed\s+by|also)$/i, "").trim();
       if (isPronounOrReference(targetHint)) {
         return createNoneResult("Cannot resolve pronoun target '" + targetHint + "' without prior clickable context");
       }
@@ -1070,40 +1530,82 @@
       ]);
     }
 
-    // 6b. Open page / navigation: "open downloads", "open the downloads page", "go to documentation"
+    // 6b. Open page / navigation: "open YouTube", "go to Wikipedia", "open downloads", "navigate to GitHub"
     const openMatch = task.match(/^(?:open|navigate\s+to|go\s+to)\s+(?:the\s+)?([a-zA-Z0-9_\-\s]+?)(?:\s+page|\s+link|\s+tab)?$/i);
     if (openMatch) {
-      const targetHint = openMatch[1].trim();
+      const targetHint = openMatch[1].trim().replace(/\s+(?:and\s+then|and|then|after\s+that|next|followed\s+by|also)$/i, "").trim();
       if (isPronounOrReference(targetHint)) {
         return createNoneResult("Cannot resolve pronoun target '" + targetHint + "' without prior clickable context");
       }
+      const isUiContainer = /^(?:filters?|menu|dropdown|accordion|dialog|modal|panel|cart|popup|drawer|sidebar|section|tabs?|options?|settings?)$/i.test(targetHint.toLowerCase()) ||
+        /\b(?:section|panel|container|accordion|dropdown|filters?|modal|dialog|drawer|sidebar)\b/i.test(targetHint.toLowerCase());
+
+      if (isUiContainer) {
+        return buildResultFromSteps([
+          {
+            type: "CLICK",
+            action: "CLICK",
+            targetHint: targetHint,
+            target: targetHint,
+            legacyTarget: resolveLegacyClickTarget(targetHint)
+          }
+        ]);
+      }
+
       return buildResultFromSteps([
         {
-          type: "CLICK",
+          type: "NAVIGATE",
+          action: "NAVIGATE",
           targetHint: targetHint,
+          target: targetHint,
+          url: resolveNavigationUrl(targetHint),
+          isNavigation: true,
           legacyTarget: resolveLegacyClickTarget(targetHint)
         }
       ]);
     }
 
-    // 6c. Standard CLICK / FIND: "click add to cart", "find english", "press submit", "click continue", "tap on search"
-    const clickMatch = task.match(/^(?:click|press|tap|find|locate)\s+(?:on\s+)?(?:the\s+)?([a-zA-Z0-9_\-\s]+?)(?:\s+button|\s+link)?$/i);
+    // 6c. Standard CLICK / FIND: "click add to cart", "find english", "press submit", "click continue", "tap on search", "look for settings", "find the black colour earbuds"
+    const clickMatch = task.match(/^(?:click|press|tap|find|locate|look\s+for)\s+(?:on\s+)?(?:the\s+)?([a-zA-Z0-9_\-\s]+?)(?:\s+button|\s+link)?$/i);
     if (clickMatch) {
-      const targetHint = clickMatch[1].trim();
+      const targetHint = clickMatch[1].trim().replace(/\s+(?:and\s+then|and|then|after\s+that|next|followed\s+by|also)$/i, "").trim();
       // Never create a standalone target named "it", "this", "that", "them", "the button", "the above", etc.
       if (isPronounOrReference(targetHint)) {
         return createNoneResult("Cannot resolve pronoun target '" + targetHint + "' without prior clickable context");
       }
+      const attrConstraint = extractAttributeConstraint(targetHint);
       return buildResultFromSteps([
         {
           type: "CLICK",
           targetHint: targetHint,
+          target: targetHint,
+          objectTarget: attrConstraint ? attrConstraint.objectTarget : null,
+          attribute: attrConstraint ? attrConstraint.attribute : null,
+          attributeValue: attrConstraint ? attrConstraint.attributeValue : null,
           legacyTarget: resolveLegacyClickTarget(targetHint)
         }
       ]);
     }
 
-    // 6d. COMPOSE intent: e.g. "compose a new email", "compose email", "compose new message", "compose"
+    // 6d. COMPOSE intent with recipient: e.g. "compose an email to test@example.com", "compose message to X"
+    const composeRecipientMatch = task.match(/^compose(?:\s+(?:(?:a\s+|an\s+)?(?:new\s+)?(?:email|mail|message|letter|draft)))?\s+to\s+['"]?([^'",;]+?)['"]?$/i);
+    if (composeRecipientMatch) {
+      const recipient = cleanValue(composeRecipientMatch[1]);
+      return buildResultFromSteps([
+        {
+          type: "CLICK",
+          targetHint: "compose",
+          legacyTarget: null
+        },
+        {
+          type: "FILL",
+          fieldHint: "recipient",
+          value: recipient
+        }
+      ]);
+    }
+
+    // 6d-2. Standalone COMPOSE intent: e.g. "compose a new email", "compose email", "compose new message", "compose"
     const composeMatch = task.match(/^compose(?:\s+(?:(?:a\s+|an\s+)?(?:new\s+)?([a-zA-Z0-9_\-\s]+?)))?$/i);
     if (composeMatch) {
       return buildResultFromSteps([
@@ -1127,6 +1629,53 @@
       ]);
     }
 
+    // 6f. TOGGLE / ENABLE / DISABLE / TURN ON / TURN OFF intent: e.g. "enable dark mode", "turn on dark mode"
+    const toggleMatch = task.match(/^(?:(enable|turn\s+on|activate|check|tick)|(disable|turn\s+off|deactivate|uncheck|untick)|(toggle))\s+(?:the\s+)?([a-zA-Z0-9_\-\s]+?)(?:\s+(?:option|checkbox|toggle|switch))?$/i);
+    if (toggleMatch) {
+      const isEnable = Boolean(toggleMatch[1]);
+      const isDisable = Boolean(toggleMatch[2]);
+      const actType = isEnable ? "CHECK" : (isDisable ? "UNCHECK" : "TOGGLE");
+      const targetHint = toggleMatch[4].trim();
+      return buildResultFromSteps([
+        {
+          type: actType,
+          action: actType,
+          targetHint: targetHint,
+          target: targetHint,
+          targetType: "checkbox"
+        }
+      ]);
+    }
+
+    // 6g. SAVE intent: e.g. "save changes", "save the changes", "save"
+    const saveMatch = task.match(/^save(?:\s+(?:the\s+)?([a-zA-Z0-9_\-\s]+?))?$/i);
+    if (saveMatch) {
+      const subTarget = saveMatch[1] ? saveMatch[1].trim() : "";
+      const targetHint = subTarget ? ("save " + subTarget) : "save";
+      return buildResultFromSteps([
+        {
+          type: "CLICK",
+          targetHint: targetHint,
+          legacyTarget: resolveLegacyClickTarget(targetHint)
+        }
+      ]);
+    }
+
+    // 6h. DOWNLOAD intent: e.g. "download the latest PDF", "download it", "download report"
+    const downloadMatch = task.match(/^download(?:\s+(?:the\s+)?([a-zA-Z0-9_\-\s]+?))?$/i);
+    if (downloadMatch) {
+      const subTarget = downloadMatch[1] ? downloadMatch[1].trim() : "";
+      const isPronoun = isPronounOrReference(subTarget);
+      const targetHint = (!subTarget || isPronoun) ? "download" : subTarget;
+      return buildResultFromSteps([
+        {
+          type: "CLICK",
+          targetHint: targetHint,
+          legacyTarget: null
+        }
+      ]);
+    }
+
     // 7. Legacy standalone keyword rules: login, next, submit, search
     const legacyTarget = resolveLegacyClickTarget(lower);
     if (legacyTarget) {
@@ -1146,11 +1695,12 @@
   /**
    * Assembles a structured result from ordered steps, enforcing the privacy contract.
    * @param {Array<Object>} steps
+   * @param {Object} [constraintsObj]
    * @returns {Object}
    */
-  function buildResultFromSteps(steps) {
+  function buildResultFromSteps(steps, constraintsObj) {
     if (!steps || steps.length === 0) {
-      return createNoneResult("No steps parsed");
+      return createNoneResult("No steps parsed", constraintsObj);
     }
 
     const sanitizedPlan = [];
@@ -1171,7 +1721,7 @@
           stepIds: [idx]
         };
         goals.push(currentGoal);
-      } else if (step.type === "FILL" && step.fieldHint === "search") {
+      } else if (step.type === "FILL" && (step.fieldHint === "search" || step.fieldHint === "Search mail")) {
         currentGoal = {
           id: goals.length + 1,
           title: `Search for '${step.value || "query"}'`,
@@ -1238,6 +1788,16 @@
           stepIds: [idx]
         };
         goals.push(currentGoal);
+      } else if (step.type === "NAVIGATE") {
+        currentGoal = {
+          id: goals.length + 1,
+          title: `Navigate to ${step.targetHint || step.target || "destination"}`,
+          type: "NAVIGATE",
+          target: step.targetHint || step.target || "destination",
+          url: step.url || null,
+          stepIds: [idx]
+        };
+        goals.push(currentGoal);
       } else if (step.type === "SCROLL") {
         currentGoal = {
           id: goals.length + 1,
@@ -1271,6 +1831,9 @@
         sanitizedPlan.push({
           type: "FILL",
           fieldHint: step.fieldHint,
+          semanticTarget: step.semanticTarget || step.fieldHint,
+          expectedRole: step.expectedRole || step.role || "input",
+          role: step.role || step.expectedRole || "input",
           stepId: idx,
           goalId: step.goalId
         });
@@ -1282,16 +1845,20 @@
         const normHint = (step.fieldHint || "").toLowerCase().trim();
         if (normHint) {
           localValues[normHint] = step.value;
-          if (normHint === "body") {
+          if (normHint === "body" || normHint.includes("message")) {
             localValues["message"] = step.value;
-          } else if (normHint === "message") {
             localValues["body"] = step.value;
+          } else if (normHint === "recipient" || normHint === "to") {
+            localValues["to"] = step.value;
+            localValues["recipient"] = step.value;
+            localValues["email"] = step.value;
           }
         }
       } else if (step.type === "SUBMIT") {
         sanitizedPlan.push({
           type: "SUBMIT",
           targetHint: step.targetHint || "search",
+          semanticTarget: step.semanticTarget || step.targetHint || "search",
           stepId: idx,
           goalId: step.goalId
         });
@@ -1306,6 +1873,7 @@
           action: step.type,
           targetHint: step.targetHint || step.target,
           target: step.targetHint || step.target,
+          semanticTarget: step.semanticTarget || step.targetHint || step.target,
           context: step.context || null,
           relation: step.relation || null,
           ordinal: step.ordinal !== undefined ? step.ordinal : null,
@@ -1319,11 +1887,18 @@
           action: "CLICK",
           targetHint: step.targetHint,
           target: step.targetHint,
+          semanticTarget: step.semanticTarget || step.targetHint,
+          expectedRole: step.expectedRole || step.role || "button",
+          role: step.role || step.expectedRole || "button",
+          requiresApproval: !!step.requiresApproval,
           legacyTarget: step.legacyTarget || null,
           context: step.context || null,
           relation: step.relation || null,
           ordinal: step.ordinal !== undefined ? step.ordinal : null,
           targetType: step.targetType || null,
+          objectTarget: step.objectTarget || null,
+          attribute: step.attribute || null,
+          attributeValue: step.attributeValue || null,
           stepId: idx,
           goalId: step.goalId
         });
@@ -1331,6 +1906,17 @@
           localValues["search_query"] = step.query;
           localValues[`step_${idx}`] = step.query;
         }
+      } else if (step.type === "NAVIGATE") {
+        sanitizedPlan.push({
+          type: "NAVIGATE",
+          action: "NAVIGATE",
+          targetHint: step.targetHint || step.target,
+          target: step.targetHint || step.target,
+          semanticTarget: step.semanticTarget || step.targetHint || step.target,
+          url: step.url || null,
+          stepId: idx,
+          goalId: step.goalId
+        });
       } else if (step.type === "SCROLL") {
         sanitizedPlan.push({
           type: "SCROLL",
@@ -1349,34 +1935,49 @@
       ? "MULTI_STEP"
       : (steps[0].type || "NONE");
 
+    const cons = constraintsObj || currentActiveConstraints;
+
     return {
       intent: primaryIntent,
       steps: steps,
       goals: goals,
       sanitizedPlan: sanitizedPlan,
       localValues: localValues,
-      isMultiStep: isMultiStep
+      isMultiStep: isMultiStep,
+      constraints: (cons && cons.constraints) || [],
+      stopCondition: (cons && cons.stopCondition) || null,
+      approvalRequirement: (cons && cons.approvalRequirement) || null,
+      requireApprovalBeforeSend: !!(cons && cons.requireApprovalBeforeSend),
+      doNotSend: !!(cons && cons.doNotSend)
     };
   }
 
   /**
    * Helper to create safe fallback NONE result.
    * @param {string} reason
+   * @param {Object} [constraintsObj]
    * @returns {Object}
    */
-  function createNoneResult(reason) {
+  function createNoneResult(reason, constraintsObj) {
+    const cons = constraintsObj || currentActiveConstraints;
     return {
       intent: "NONE",
       reason: reason || "Unrecognized task",
       steps: [{ type: "NONE" }],
       sanitizedPlan: [{ type: "NONE" }],
       localValues: {},
-      isMultiStep: false
+      isMultiStep: false,
+      constraints: (cons && cons.constraints) || [],
+      stopCondition: (cons && cons.stopCondition) || null,
+      approvalRequirement: (cons && cons.approvalRequirement) || null,
+      requireApprovalBeforeSend: !!(cons && cons.requireApprovalBeforeSend),
+      doNotSend: !!(cons && cons.doNotSend)
     };
   }
 
   return {
     parseTask,
+    resolveNavigationUrl,
     parseContextualClause,
     extractOrdinal,
     normalizeRelation,
@@ -1389,6 +1990,9 @@
     cleanFieldHint,
     cleanValue,
     parseJuxtapositionFill,
+    extractExecutionConstraints,
+    stripExecutionControlPhrases,
+    extractAttributeConstraint,
     DEFAULT_SCROLL_AMOUNT
   };
 });

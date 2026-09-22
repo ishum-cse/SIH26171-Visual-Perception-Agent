@@ -142,6 +142,17 @@
       };
     }
 
+    // 2b. NAVIGATE / OPEN_URL Action: Safe destination navigation
+    if (actionType === "NAVIGATE" || actionType === "OPEN_URL") {
+      return {
+        risk: RISK_LEVELS.LOW,
+        level: RISK_LEVELS.LOW,
+        requiresApproval: false,
+        reason: `Navigation to '${action.target || action.targetLabel || "destination"}'. Autonomous execution permitted.`,
+        rationale: `Navigation to '${action.target || action.targetLabel || "destination"}'. Autonomous execution permitted.`
+      };
+    }
+
     // 3. CLICK Action: Risk depends on the semantic consequence of clicking the target
     if (actionType === "CLICK") {
       // Check for critical keywords
@@ -289,8 +300,12 @@
           stepId: idx,
           goalId: rawStep.goalId || null,
           type: "FILL",
-          target: rawStep.fieldHint,
+          target: rawStep.semanticTarget || rawStep.fieldHint,
           fieldHint: rawStep.fieldHint,
+          semanticTarget: rawStep.semanticTarget || rawStep.fieldHint,
+          expectedRole: rawStep.expectedRole || rawStep.role || "input",
+          role: rawStep.role || rawStep.expectedRole || "input",
+          value: rawStep.value || "",
           risk: riskAssessment.risk || riskAssessment.level,
           level: riskAssessment.level,
           requiresApproval: riskAssessment.requiresApproval,
@@ -301,13 +316,14 @@
         reasoningTrace.push(`Step ${idx + 1} planned: FILL '${rawStep.fieldHint}' [${riskAssessment.level} Risk - Autonomous]`);
       } else if (stepType === "CLICK") {
         clickCount++;
-        const targetLabel = rawStep.legacyTarget || rawStep.targetHint || "control";
+        const targetLabel = rawStep.semanticTarget || rawStep.legacyTarget || rawStep.targetHint || "control";
         riskAssessment = classifyActionRisk({
           action: "CLICK",
           targetLabel: targetLabel,
           semanticTag: rawStep.legacyTarget
         });
-        if (riskAssessment.requiresApproval) {
+        const requiresApproval = rawStep.requiresApproval || riskAssessment.requiresApproval;
+        if (requiresApproval) {
           hasHighRiskStep = true;
         }
 
@@ -316,7 +332,7 @@
         if (isSubmit && fillCount > 0) {
           preconditions.unshift("all_prior_fields_verified");
         }
-        if (riskAssessment.requiresApproval) {
+        if (requiresApproval) {
           preconditions.push("human_approval_granted");
         }
 
@@ -327,6 +343,9 @@
           type: "CLICK",
           target: targetLabel,
           targetHint: targetLabel,
+          semanticTarget: rawStep.semanticTarget || targetLabel,
+          expectedRole: rawStep.expectedRole || rawStep.role || "button",
+          role: rawStep.role || rawStep.expectedRole || "button",
           legacyTarget: rawStep.legacyTarget || null,
           query: rawStep.query || null,
           isProductSelection: !!rawStep.isProductSelection,
@@ -337,16 +356,23 @@
           relation: rawStep.relation || null,
           ordinal: rawStep.ordinal !== undefined ? rawStep.ordinal : null,
           targetType: rawStep.targetType || null,
-          risk: riskAssessment.risk || riskAssessment.level,
-          level: riskAssessment.level,
-          requiresApproval: riskAssessment.requiresApproval,
+          objectTarget: rawStep.objectTarget || null,
+          attribute: rawStep.attribute || null,
+          attributeValue: rawStep.attributeValue || null,
+          risk: requiresApproval ? RISK_LEVELS.HIGH : (riskAssessment.risk || riskAssessment.level),
+          level: requiresApproval ? RISK_LEVELS.HIGH : riskAssessment.level,
+          requiresApproval: requiresApproval,
           approvalPrompt: `Execute consequential action: CLICK → ${targetLabel}`,
           reasoning: riskAssessment.rationale,
           preconditions: preconditions,
           postconditions: ["page_state_verified"]
         });
-        const riskLabel = riskAssessment.requiresApproval ? "HIGH Risk - Approval Required" : `${riskAssessment.level} Risk - Autonomous`;
-        reasoningTrace.push(`Step ${idx + 1} planned: CLICK '${targetLabel}' [${riskLabel}]`);
+        const riskLabel = requiresApproval ? "HIGH Risk - Approval Required" : `${riskAssessment.level} Risk - Autonomous`;
+        if (rawStep.attribute && rawStep.attributeValue) {
+          reasoningTrace.push(`Step ${idx + 1} planned: CLICK '${targetLabel}' (object='${rawStep.objectTarget}', ${rawStep.attribute}='${rawStep.attributeValue}') [${riskLabel}]`);
+        } else {
+          reasoningTrace.push(`Step ${idx + 1} planned: CLICK '${targetLabel}' [${riskLabel}]`);
+        }
       } else if (stepType === "SUBMIT") {
         const targetHint = rawStep.targetHint || "search";
         riskAssessment = classifyActionRisk({ action: "SUBMIT", targetLabel: targetHint });
@@ -388,6 +414,26 @@
           postconditions: ["scroll_position_verified"]
         });
         reasoningTrace.push(`Step ${idx + 1} planned: SCROLL [${riskAssessment.level} Risk - Autonomous]`);
+      } else if (stepType === "NAVIGATE" || stepType === "OPEN_URL") {
+        const targetLabel = rawStep.targetHint || rawStep.target || "destination";
+        riskAssessment = classifyActionRisk({ action: "NAVIGATE", target: targetLabel, targetLabel: targetLabel });
+        steps.push({
+          id: idx + 1,
+          stepId: idx,
+          goalId: rawStep.goalId || null,
+          type: "NAVIGATE",
+          action: "NAVIGATE",
+          target: targetLabel,
+          targetHint: targetLabel,
+          url: rawStep.url || null,
+          risk: riskAssessment.risk || riskAssessment.level,
+          level: riskAssessment.level,
+          requiresApproval: false,
+          reasoning: `Step ${idx + 1}: Navigate to ${targetLabel}.`,
+          preconditions: ["browser_active"],
+          postconditions: ["page_navigated"]
+        });
+        reasoningTrace.push(`Step ${idx + 1} planned: NAVIGATE '${targetLabel}' [${riskAssessment.level} Risk - Autonomous]`);
       } else if (["CHECK", "UNCHECK", "SELECT", "TOGGLE"].includes(stepType)) {
         clickCount++;
         const targetLabel = rawStep.targetHint || rawStep.target || "control";
@@ -411,6 +457,9 @@
           relation: rawStep.relation || null,
           ordinal: rawStep.ordinal !== undefined ? rawStep.ordinal : null,
           targetType: rawStep.targetType || null,
+          objectTarget: rawStep.objectTarget || null,
+          attribute: rawStep.attribute || null,
+          attributeValue: rawStep.attributeValue || null,
           risk: riskAssessment.risk || riskAssessment.level,
           level: riskAssessment.level,
           requiresApproval: riskAssessment.requiresApproval,
@@ -449,6 +498,11 @@
       hasHighRiskStep: hasHighRiskStep,
       steps: steps,
       goals: goals,
+      constraints: parsedTask.constraints || [],
+      stopCondition: parsedTask.stopCondition || null,
+      approvalRequirement: parsedTask.approvalRequirement || null,
+      requireApprovalBeforeSend: !!parsedTask.requireApprovalBeforeSend,
+      doNotSend: !!parsedTask.doNotSend,
       reasoningTrace: reasoningTrace
     };
   }
@@ -566,7 +620,7 @@
     const actionType = (agentAction.action || "").toUpperCase();
     const ALLOWED_ACTIONS = new Set([
       "CLICK", "SCROLL", "FILL", "FILL_FORM", "SUBMIT", "NONE",
-      "CHECK", "UNCHECK", "SELECT", "TOGGLE"
+      "CHECK", "UNCHECK", "SELECT", "TOGGLE", "NAVIGATE", "OPEN_URL"
     ]);
     if (!ALLOWED_ACTIONS.has(actionType)) {
       return {

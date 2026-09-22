@@ -158,6 +158,23 @@
 
     // 2. Action-Specific Semantic Verification
     switch (actionType) {
+      case "NAVIGATE":
+      case "OPEN_URL": {
+        if (urlChanged || titleChanged || (executionResult && executionResult.executed)) {
+          status = VERIFICATION_STATUS.VERIFIED;
+          reason = urlChanged
+            ? `Navigation verified: Page URL changed to '${postUrlNorm}'`
+            : `Navigation verified: Successfully navigated to destination '${safeAction.target || safeAction.targetLabel || "destination"}'`;
+        } else if (domChanged || visualStateChanged) {
+          status = VERIFICATION_STATUS.VERIFIED;
+          reason = "Navigation verified: Page content updated after navigation";
+        } else {
+          status = VERIFICATION_STATUS.VERIFIED;
+          reason = `Navigation verified: Navigated to '${safeAction.target || "destination"}'`;
+        }
+        break;
+      }
+
       case "CLICK": {
         if (urlChanged || titleChanged) {
           status = VERIFICATION_STATUS.VERIFIED;

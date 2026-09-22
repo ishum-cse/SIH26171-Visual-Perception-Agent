@@ -1,13 +1,15 @@
 {
   "manifest_version": 3,
-  "name": "SIH26171 - Visual Perception Agent",
+  "name": "IRIS",
+  "short_name": "IRIS",
   "version": "1.0.0",
-  "description": "On-device Visual Perception Agent Prototype (Milestone 9).",
+  "description": "IRIS — Your Browser's Eyes, On Your Device.",
 
   "permissions": [
     "activeTab",
     "scripting",
-    "tabs"
+    "tabs",
+    "sidePanel"
   ],
 
   "host_permissions": [
@@ -23,9 +25,12 @@
     "service_worker": "background.js"
   },
 
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+
   "action": {
-    "default_popup": "popup.html",
-    "default_title": "Visual Perception Agent"
+    "default_title": "IRIS"
   },
 
   "content_scripts": [

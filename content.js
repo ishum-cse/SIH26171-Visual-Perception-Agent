@@ -234,13 +234,31 @@ function executeAction(actionPayload) {
 
   const { action, target, amount } = actionPayload;
 
-  // Explicit action allowlist check: permitted actions including M23 additions
-  const ALLOWED_ACTIONS = new Set(["CLICK", "SCROLL", "FILL", "FILL_FORM", "AUTOFILL", "SUBMIT", "CHECK", "UNCHECK", "SELECT", "TOGGLE"]);
+  // Explicit action allowlist check: permitted actions including M23 additions and NAVIGATE
+  const ALLOWED_ACTIONS = new Set(["CLICK", "SCROLL", "FILL", "FILL_FORM", "AUTOFILL", "SUBMIT", "CHECK", "UNCHECK", "SELECT", "TOGGLE", "NAVIGATE", "OPEN_URL"]);
   if (!ALLOWED_ACTIONS.has(action)) {
     return {
       executed: false,
       reason: "Unsupported or unknown action/target"
     };
+  }
+
+  // 0. NAVIGATE Action Execution
+  if (action === "NAVIGATE" || action === "OPEN_URL") {
+    let destUrl = actionPayload.url;
+    if (!destUrl && actionPayload.target) {
+      const cleanName = String(actionPayload.target).toLowerCase().replace(/[^a-z0-9\-]/g, "");
+      destUrl = `https://www.${cleanName}.com`;
+    }
+    if (destUrl) {
+      try {
+        window.location.href = destUrl;
+        return { executed: true, action: "NAVIGATE", target: actionPayload.target, url: destUrl };
+      } catch (e) {
+        return { executed: false, reason: `Navigation failed: ${e.message}` };
+      }
+    }
+    return { executed: false, reason: "No destination URL for NAVIGATE action" };
   }
 
   // 1. CLICK Action Execution (Milestone 5, 14, 15 & M23 Hierarchical Grounding)
@@ -1602,6 +1620,8 @@ function classifyVisualElement(el, fieldId = null) {
     placeholder: (el.getAttribute ? el.getAttribute("placeholder") : null) || null,
     ariaLabel: (el.getAttribute ? el.getAttribute("aria-label") : null) || null,
     title: (el.getAttribute ? el.getAttribute("title") : null) || null,
+    alt: (el.getAttribute ? el.getAttribute("alt") : null) || (el.querySelector ? el.querySelector("img[alt]")?.getAttribute("alt") : null) || null,
+    dataColor: (el.getAttribute ? (el.getAttribute("data-color") || el.getAttribute("data-colour") || (el.dataset && (el.dataset.color || el.dataset.colour))) : null) || null,
     inputType: tagName === "input" ? (el.type || "text") : null,
     isInteractable: !isDisabled && ["button", "link", "input", "textarea", "select", "checkbox", "radio", "textbox"].includes(type),
     x: Math.round(rect.x),

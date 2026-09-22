@@ -162,7 +162,7 @@ console.log("============================================================");
   const taskYT = "Open YouTube, search for Java DSA tutorial, open the most relevant video, and play it.";
   const parsedYT = SIHTaskParser.parseTask(taskYT);
   assert.strictEqual(parsedYT.steps.length, 5, `Expected 5 steps for YouTube workflow, got ${parsedYT.steps.length}`);
-  assert.strictEqual(parsedYT.steps[0].type, "CLICK");
+  assert.strictEqual(parsedYT.steps[0].type, "NAVIGATE");
   assert.strictEqual(parsedYT.steps[0].targetHint, "YouTube");
   assert.strictEqual(parsedYT.steps[1].type, "FILL");
   assert.strictEqual(parsedYT.steps[1].fieldHint, "search");
