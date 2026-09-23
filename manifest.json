@@ -66,6 +66,7 @@
         "form-profile.json",
         "change-detector.js",
         "reasoning-planner.js",
+        "semantic-resolver.js",
         "task-parser.js",
         "evaluation-tracker.js"
       ],

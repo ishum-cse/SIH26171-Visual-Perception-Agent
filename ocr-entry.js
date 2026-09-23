@@ -9,8 +9,7 @@
  * - OCR text and bounding boxes are NEVER transmitted to FastAPI or any server.
  * - Sensitive string values are never stored in region objects or displayed in the UI.
  */
-
-import { createWorker } from "tesseract.js";
+const { createWorker } = require("tesseract.js");
 
 let ocrWorkerInstance = null;
 let ocrWorkerInitPromise = null;
@@ -215,38 +214,59 @@ async function runOcr(screenshotDataUrl) {
 }
 
 /**
- * Reuses M2's regex patterns to detect sensitive PII spans in OCR output.
- * Patterns: Passwords, Credit Cards, Phones, Emails.
+ * Reuses the canonical local PII detector to detect sensitive visual spans in OCR output.
+ * NEVER stores, displays, or transmits raw matched sensitive text strings.
+ *
+ * @param {string} text - Text to evaluate
+ * @returns {{ sensitive: boolean, category: string|null }}
  */
-const PII_REGEXES = [
-  /\b((?:password|pwd|passcode|secret)[\s:=]+(?:is[\s:=]*)?)([^\s\r\n,;!]+)/i,
-  /\b(?:\d{4}[ -]?){3}\d{1,4}\b|\b\d{13,16}\b/,
-  /(?:\+?\d{1,3}[\s-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}\b|\b\d{10}\b/,
-  /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/
-];
+function inspectTextSensitivity(text) {
+  if (!text || typeof text !== "string") {
+    return { sensitive: false, category: null };
+  }
+
+  let result = null;
+  if (typeof detectAndRedactSensitiveValue === "function") {
+    result = detectAndRedactSensitiveValue(text);
+  } else if (typeof window !== "undefined" && typeof window.detectAndRedactSensitiveValue === "function") {
+    result = window.detectAndRedactSensitiveValue(text);
+  } else if (typeof globalThis !== "undefined" && typeof globalThis.detectAndRedactSensitiveValue === "function") {
+    result = globalThis.detectAndRedactSensitiveValue(text);
+  } else if (typeof redactText === "function") {
+    const red = redactText(text);
+    result = { detected: red !== text, redacted: red, categories: [] };
+  } else if (typeof window !== "undefined" && typeof window.redactText === "function") {
+    const red = window.redactText(text);
+    result = { detected: red !== text, redacted: red, categories: [] };
+  } else if (typeof require === "function") {
+    try {
+      const pii = require("./pii-detector.js");
+      if (pii && typeof pii.detectAndRedactSensitiveValue === "function") {
+        result = pii.detectAndRedactSensitiveValue(text);
+      }
+    } catch (_) {}
+  }
+
+  if (result && result.detected) {
+    const cat = (result.categories && result.categories[0]) ? result.categories[0] : "SENSITIVE";
+    return { sensitive: true, category: cat };
+  }
+  return { sensitive: false, category: null };
+}
 
 /**
- * Checks if a given text contains sensitive PII using M2 detectors.
+ * Checks if a given text contains sensitive PII using the canonical detector.
  *
  * @param {string} text - Text to evaluate
  * @returns {boolean} True if sensitive PII matched
  */
 function isSensitiveText(text) {
-  if (!text || typeof text !== "string") return false;
-
-  // Primary: delegate to window.redactText if available (exact M2 parity)
-  if (typeof window !== "undefined" && typeof window.redactText === "function") {
-    const redacted = window.redactText(text);
-    if (redacted !== text) return true;
-  }
-
-  // Fallback: test identical regex array
-  return PII_REGEXES.some(regex => regex.test(text));
+  return inspectTextSensitivity(text).sensitive;
 }
 
 /**
  * Detects sensitive PII regions from OCR words and lines.
- * Outputs coordinates only; never includes raw sensitive strings.
+ * Outputs coordinates + category metadata only; never includes raw sensitive strings.
  *
  * @param {Object|Array} ocrData - OCR result with { words, lines } or words array
  * @returns {Array<Object>} Array of sensitive OCR regions in screenshot pixel coordinates
@@ -260,11 +280,12 @@ function detectSensitiveOcrRegions(ocrData) {
 
   const matchedWordIndices = new Set();
 
-  // 1. Line-level scan: detect multi-word sensitive spans (e.g. grouped card numbers, emails, passwords)
+  // 1. Line-level scan: detect multi-word sensitive spans (e.g. grouped card numbers, emails, passwords, bank accounts)
   lines.forEach((line) => {
     if (!line || !line.text) return;
 
-    if (isSensitiveText(line.text)) {
+    const lineInspection = inspectTextSensitivity(line.text);
+    if (lineInspection.sensitive) {
       const lineWords = Array.isArray(line.words) ? line.words : [];
 
       // Check sub-slices of adjacent words on the line
@@ -274,7 +295,8 @@ function detectSensitiveOcrRegions(ocrData) {
           const slice = lineWords.slice(i, i + len);
           const sliceText = slice.map(w => w.text).join(" ");
 
-          if (isSensitiveText(sliceText)) {
+          const sliceInspection = inspectTextSensitivity(sliceText);
+          if (sliceInspection.sensitive) {
             const minX = Math.min(...slice.map(w => w.x));
             const minY = Math.min(...slice.map(w => w.y));
             const maxX = Math.max(...slice.map(w => w.x + w.width));
@@ -286,6 +308,7 @@ function detectSensitiveOcrRegions(ocrData) {
               width: maxX - minX,
               height: maxY - minY,
               source: "ocr",
+              category: sliceInspection.category || lineInspection.category || "SENSITIVE",
               scaled: true
             });
 
@@ -303,6 +326,7 @@ function detectSensitiveOcrRegions(ocrData) {
           width: line.width,
           height: line.height,
           source: "ocr",
+          category: lineInspection.category || "SENSITIVE",
           scaled: true
         });
       }
@@ -311,15 +335,19 @@ function detectSensitiveOcrRegions(ocrData) {
 
   // 2. Standalone word scan for any single-word matches not captured by line grouping
   words.forEach((w) => {
-    if (w && w.text && isSensitiveText(w.text)) {
-      regions.push({
-        x: w.x,
-        y: w.y,
-        width: w.width,
-        height: w.height,
-        source: "ocr",
-        scaled: true
-      });
+    if (w && w.text) {
+      const wordInspection = inspectTextSensitivity(w.text);
+      if (wordInspection.sensitive) {
+        regions.push({
+          x: w.x,
+          y: w.y,
+          width: w.width,
+          height: w.height,
+          source: "ocr",
+          category: wordInspection.category || "SENSITIVE",
+          scaled: true
+        });
+      }
     }
   });
 

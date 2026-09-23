@@ -1707,12 +1707,10 @@ function extractVisualElementsWithNodes() {
 }
 
 /**
- * Milestone 11: Local DOM-attribute heuristic for sensitive input detection.
- * Checks purely input types and name/id/placeholder keywords.
+ * Milestone 11 & Privacy Hardening: Local DOM-attribute heuristic for sensitive input detection.
+ * Evaluates safe metadata only: input types, autocomplete, and name/id/placeholder/label keywords.
  * SECURITY: Never reads or inspects `.value` of any field.
  */
-const SENSITIVE_KEYWORDS = ["card", "credit", "cvv", "ssn", "phone", "password", "email"];
-
 function isSensitiveElement(el) {
   if (!el || !el.tagName) {
     return false;
@@ -1727,17 +1725,59 @@ function isSensitiveElement(el) {
   }
 
   const type = (el.type || "").toLowerCase();
-  if (tagName === "input" && (type === "password" || type === "email")) {
-    return true;
+  const nameAttr = (el.getAttribute ? (el.getAttribute("name") || "") : "").toLowerCase();
+  const idAttr = (el.id || "").toLowerCase();
+  const placeholderAttr = (el.getAttribute ? (el.getAttribute("placeholder") || "") : "").toLowerCase();
+  const autocompleteAttr = (el.getAttribute ? (el.getAttribute("autocomplete") || "") : "").toLowerCase();
+  const ariaLabelAttr = (el.getAttribute ? (el.getAttribute("aria-label") || "") : "").toLowerCase();
+
+  // Safe associated label text if present
+  let labelText = "";
+  if (el.id && typeof document !== "undefined" && document.querySelector) {
+    try {
+      const labelEl = document.querySelector(`label[for="${el.id}"]`);
+      if (labelEl) {
+        labelText = (labelEl.innerText || labelEl.textContent || "").trim();
+      }
+    } catch (_) {}
   }
 
-  // Pure attribute heuristic — never reads .value
-  const nameAttr = (el.getAttribute("name") || "").toLowerCase();
-  const idAttr = (el.id || "").toLowerCase();
-  const placeholderAttr = (el.getAttribute("placeholder") || "").toLowerCase();
+  const metadata = {
+    type,
+    name: nameAttr,
+    id: idAttr,
+    placeholder: placeholderAttr,
+    autocomplete: autocompleteAttr,
+    ariaLabel: ariaLabelAttr,
+    labelText
+  };
 
+  // Delegate to canonical pii-detector module
+  if (typeof isSensitiveInputMetadata === "function") {
+    return isSensitiveInputMetadata(metadata);
+  }
+  if (typeof window !== "undefined" && typeof window.isSensitiveInputMetadata === "function") {
+    return window.isSensitiveInputMetadata(metadata);
+  }
+  if (typeof globalThis !== "undefined" && typeof globalThis.isSensitiveInputMetadata === "function") {
+    return globalThis.isSensitiveInputMetadata(metadata);
+  }
+  if (typeof require === "function") {
+    try {
+      const pii = require("./pii-detector.js");
+      if (pii && typeof pii.isSensitiveInputMetadata === "function") {
+        return pii.isSensitiveInputMetadata(metadata);
+      }
+    } catch (_) {}
+  }
+
+  // Fallback heuristic if detector module is not yet wired
+  if (tagName === "input" && (type === "password" || type === "email" || type === "tel")) {
+    return true;
+  }
+  const SENSITIVE_KEYWORDS = ["card", "credit", "cvv", "ssn", "phone", "password", "email", "bank", "account", "token", "otp", "pin"];
   return SENSITIVE_KEYWORDS.some(kw =>
-    nameAttr.includes(kw) || idAttr.includes(kw) || placeholderAttr.includes(kw)
+    nameAttr.includes(kw) || idAttr.includes(kw) || placeholderAttr.includes(kw) || ariaLabelAttr.includes(kw)
   );
 }
 

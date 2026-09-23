@@ -663,6 +663,65 @@ document.addEventListener("DOMContentLoaded", () => {
     fusionDetails.style.display = "block";
   };
 
+  /**
+   * Updates privacy category metrics in UI without ever displaying raw sensitive values.
+   */
+  const updatePrivacyCategoryMetrics = (domRegions = [], ocrRegions = [], sampleText = "") => {
+    const container = document.getElementById("agentPrivacyCategoryBreakdown");
+    const chipsContainer = document.getElementById("agentPrivacyCategoryChips");
+    if (!container || !chipsContainer) return;
+
+    const counts = {
+      EMAIL: 0,
+      PHONE: 0,
+      PASSWORD: 0,
+      CARD: 0,
+      BANK: 0,
+      IDENTITY: 0,
+      CREDENTIAL: 0,
+      PERSONAL: 0,
+      HEALTH: 0
+    };
+
+    // 1. Tally from OCR region categories
+    if (Array.isArray(ocrRegions)) {
+      ocrRegions.forEach((r) => {
+        const cat = (r && r.category) ? String(r.category).toUpperCase() : "";
+        if (counts[cat] !== undefined) {
+          counts[cat]++;
+        } else if (cat && cat !== "SENSITIVE" && cat !== "OCR") {
+          counts.CREDENTIAL++;
+        }
+      });
+    }
+
+    // 2. Tally from text category counts if available
+    const inspectText = sampleText || (latestPageData && (latestPageData.text || latestPageData.redactedSample)) || "";
+    if (inspectText && typeof window.getCategoryCounts === "function") {
+      const textCounts = window.getCategoryCounts(inspectText);
+      for (const [k, v] of Object.entries(textCounts)) {
+        if (v > 0) {
+          counts[k] = Math.max(counts[k] || 0, v);
+        }
+      }
+    }
+
+    // Filter to active categories
+    const activeCategories = Object.entries(counts).filter(([_, c]) => c > 0);
+
+    if (activeCategories.length === 0) {
+      container.style.display = "none";
+      chipsContainer.innerHTML = "";
+      return;
+    }
+
+    chipsContainer.innerHTML = activeCategories.map(([cat, count]) => {
+      return `<span style="background: var(--privacy-emerald-light); color: var(--privacy-emerald); border: 1px solid #A7F3D0; padding: 1px 6px; border-radius: 3px; font-weight: bold; font-family: monospace;">${cat}: ${count}</span>`;
+    }).join("");
+
+    container.style.display = "block";
+  };
+
   // Helper function to execute local privacy redaction on the merged (DOM + OCR) regions (Milestones 11 & 12)
   // Fail-closed guarantee: Never displays or falls back to raw screenshot if final redaction throws/fails.
   const triggerRedaction = async () => {
@@ -759,6 +818,13 @@ document.addEventListener("DOMContentLoaded", () => {
           privacyRedactionStatus.textContent = "ACTIVE";
           privacyRedactionStatus.style.color = "#2e7d32";
         }
+
+        if (agentDomPiiCount) agentDomPiiCount.textContent = latestSensitiveRegions.length;
+        if (agentOcrPiiCount) agentOcrPiiCount.textContent = latestOcrSensitiveRegions.length;
+        if (agentSensitiveCount) agentSensitiveCount.textContent = mergedRegions.length;
+        if (agentRedactionStatus) agentRedactionStatus.textContent = "ACTIVE";
+
+        updatePrivacyCategoryMetrics(latestSensitiveRegions, latestOcrSensitiveRegions);
 
         // CRITICAL: Render the sanitized/redacted screenshot in the Local Visual Perception Preview
         if (screenshotPreview) {
@@ -1802,6 +1868,7 @@ document.addEventListener("DOMContentLoaded", () => {
                 <div style="padding: 4px; background: #f8fafc; border-radius: 4px; margin-top: 2px; border: 1px solid #e2e8f0; line-height: 1.35;">
                   <div>• <strong>Perception:</strong> ${escapeHtml(t.perception || "DOM perception active")}</div>
                   <div>• <strong>Grounding:</strong> ${escapeHtml(t.groundingStr || "Target matched")}</div>
+                  ${t.semanticDetails ? `<div>• <strong>Semantic Target:</strong> ${escapeHtml(t.semanticDetails)}</div>` : ""}
                   <div>• <strong>Safety Gate:</strong> ${escapeHtml(t.safetyDecision || "ALLOWED")} (Approval: ${escapeHtml(t.humanApproval || "NOT REQUIRED")})</div>
                   ${t.verificationDetails && t.verificationDetails.evidence ? `<div>• <strong>Verification Evidence:</strong> ${escapeHtml(Object.entries(t.verificationDetails.evidence).filter(([_, v]) => v).map(([k]) => k).join(", ") || "State evaluated")}</div>` : ""}
                   ${t.recovery ? `<div style="color: #0369a1; font-weight: bold;">• <strong>Recovery:</strong> ${escapeHtml(typeof t.recovery === "object" ? `[${t.recovery.result}] ${t.recovery.reason || "Outcome processed"}${t.recovery.recoveryAction ? ` (Action: ${t.recovery.recoveryAction})` : ""}` : t.recovery)}</div>` : ""}
@@ -2122,6 +2189,13 @@ document.addEventListener("DOMContentLoaded", () => {
         let plannedSteps = isPlannedTask ? parsedTask.steps : null;
         let totalPlannedSteps = isPlannedTask ? Math.min(plannedSteps.length, MAX_AGENT_STEPS) : 1;
         let localValuesMap = (isPlannedTask && parsedTask.localValues) ? parsedTask.localValues : {};
+        let taskContext = {
+          currentEntity: null,
+          currentIntent: null,
+          currentPage: null,
+          previousAction: null,
+          establishedEntities: []
+        };
 
         // AGENT SESSION ISOLATION (Milestone 17 Production Hardening):
         // A new task execution must NEVER inherit approval state, stale actions, or prior plan state.
@@ -2306,78 +2380,90 @@ document.addEventListener("DOMContentLoaded", () => {
           let groundingScore = 0;
 
           if (actionType === "CLICK") {
-            const isExplicitTarget = Boolean(currentStepPlan && currentStepPlan.isExplicitTarget);
-            const targetHint = normalize(
-              (currentStepPlan && (currentStepPlan.explicitTarget || currentStepPlan.targetHint || currentStepPlan.legacyTarget)) ||
-              originalAction.targetLabel ||
-              originalAction.target ||
-              ""
-            ).replace(/_button|_input/, "").trim();
+            const resolver = window.SIHSemanticResolver || (typeof SIHSemanticResolver !== "undefined" ? SIHSemanticResolver : null);
+            if (resolver && (currentStepPlan?.isSemantic || currentStepPlan?.ranking || (currentStepPlan?.ordinal !== null && currentStepPlan?.ordinal !== undefined) || currentStepPlan?.spatial || resolver.isSemanticInstruction(originalAction?.targetLabel || originalAction?.target || currentStepPlan?.targetHint))) {
+              const semanticRes = resolver.resolveSemanticTarget(currentStepPlan, freshElements, { allElements: freshElements });
+              if (semanticRes && semanticRes.action !== "PASS_THROUGH" && semanticRes.concreteElement) {
+                matchedCandidate = semanticRes.concreteElement;
+                matchedCandidateIdx = semanticRes.targetIndex;
+                groundingScore = semanticRes.groundingScore;
+              }
+            }
 
-            const isSearchBoxTarget = Boolean(
-              (targetHint && /\bsearch\s*(?:box|input|field|bar|area)?\b/i.test(targetHint)) ||
-              (currentStepPlan && currentStepPlan.legacyTarget === "SEARCH_INPUT")
-            );
+            if (!matchedCandidate) {
+              const isExplicitTarget = Boolean(currentStepPlan && currentStepPlan.isExplicitTarget);
+              const targetHint = normalize(
+                (currentStepPlan && (currentStepPlan.explicitTarget || currentStepPlan.targetHint || currentStepPlan.legacyTarget)) ||
+                originalAction.targetLabel ||
+                originalAction.target ||
+                ""
+              ).replace(/_button|_input/, "").trim();
 
-            const computeClickScore = (el) => {
-              if (!el) return 0;
-              if (el.disabled || String(el["aria-disabled"]).toLowerCase() === "true" || el.readOnly) return 0;
-              const elType = (el.type || "").toLowerCase();
-              if (!["button", "link", "input", "element", "textarea", "select"].includes(elType)) return 0;
-              const labelNorm = normalize(el.label);
-              if (!labelNorm && !targetHint) return 0;
+              const isSearchBoxTarget = Boolean(
+                (targetHint && /\bsearch\s*(?:box|input|field|bar|area)?\b/i.test(targetHint)) ||
+                (currentStepPlan && currentStepPlan.legacyTarget === "SEARCH_INPUT")
+              );
 
-              if (isSearchBoxTarget) {
-                // Reject voice/mic controls unless explicitly requested
-                if (!targetHint.includes("voice") && !targetHint.includes("mic")) {
-                  if (/voice|mic|audio|speak/i.test(labelNorm) || /voice|mic|audio|speak/i.test(el.ariaLabel || "")) {
-                    return 0;
+              const computeClickScore = (el) => {
+                if (!el) return 0;
+                if (el.disabled || String(el["aria-disabled"]).toLowerCase() === "true" || el.readOnly) return 0;
+                const elType = (el.type || "").toLowerCase();
+                if (!["button", "link", "input", "element", "textarea", "select"].includes(elType)) return 0;
+                const labelNorm = normalize(el.label);
+                if (!labelNorm && !targetHint) return 0;
+
+                if (isSearchBoxTarget) {
+                  // Reject voice/mic controls unless explicitly requested
+                  if (!targetHint.includes("voice") && !targetHint.includes("mic")) {
+                    if (/voice|mic|audio|speak/i.test(labelNorm) || /voice|mic|audio|speak/i.test(el.ariaLabel || "")) {
+                      return 0;
+                    }
                   }
+                  // Strictly prioritize editable text input
+                  if (elType === "input" || elType === "textarea" || el.semanticTag === "SEARCH_INPUT") {
+                    if (labelNorm.includes("search") || el.semanticTag === "SEARCH_INPUT") return 1.0;
+                    return 0.85;
+                  }
+                  // Heavily penalize buttons when user asked for search box
+                  if (elType === "button" || elType === "link") return 0.2;
                 }
-                // Strictly prioritize editable text input
-                if (elType === "input" || elType === "textarea" || el.semanticTag === "SEARCH_INPUT") {
-                  if (labelNorm.includes("search") || el.semanticTag === "SEARCH_INPUT") return 1.0;
-                  return 0.85;
-                }
-                // Heavily penalize buttons when user asked for search box
-                if (elType === "button" || elType === "link") return 0.2;
-              }
 
-              if (isExplicitTarget && targetHint) {
+                if (isExplicitTarget && targetHint) {
+                  if (labelNorm === targetHint) return 1.0;
+                  if (labelNorm.includes(targetHint)) return 0.95;
+                  const tokens = targetHint.split(/\s+/).filter(t => t.length > 2);
+                  if (tokens.length > 0 && tokens.every(t => labelNorm.includes(t))) return 0.90;
+                  return 0;
+                }
+
+                if (currentStepPlan?.attribute && currentStepPlan?.attributeValue && currentStepPlan?.objectTarget) {
+                  const targetObjNorm = normalize(currentStepPlan.objectTarget);
+                  const targetValNorm = normalize(currentStepPlan.attributeValue);
+                  const candText = [el.label, el.text, el.ariaLabel, el.title, el.alt, el.dataColor].filter(Boolean).map(normalize).join(" ");
+                  const objTokens = targetObjNorm.split(/\s+/).filter(t => t.length > 2);
+                  const matchesObj = candText.includes(targetObjNorm) || (objTokens.length > 0 && objTokens.every(t => candText.includes(t)));
+                  if (!matchesObj) return 0;
+                  const matchesAttr = candText.includes(targetValNorm) || (el.dataColor && normalize(el.dataColor).includes(targetValNorm));
+                  return matchesAttr ? 0.95 : 0;
+                }
+
                 if (labelNorm === targetHint) return 1.0;
-                if (labelNorm.includes(targetHint)) return 0.95;
+                if (targetHint && (labelNorm.includes(targetHint) || targetHint.includes(labelNorm))) return 0.85;
                 const tokens = targetHint.split(/\s+/).filter(t => t.length > 2);
-                if (tokens.length > 0 && tokens.every(t => labelNorm.includes(t))) return 0.90;
+                if (tokens.length > 0 && tokens.every(t => labelNorm.includes(t))) return 0.80;
                 return 0;
-              }
+              };
 
-              if (currentStepPlan?.attribute && currentStepPlan?.attributeValue && currentStepPlan?.objectTarget) {
-                const targetObjNorm = normalize(currentStepPlan.objectTarget);
-                const targetValNorm = normalize(currentStepPlan.attributeValue);
-                const candText = [el.label, el.text, el.ariaLabel, el.title, el.alt, el.dataColor].filter(Boolean).map(normalize).join(" ");
-                const objTokens = targetObjNorm.split(/\s+/).filter(t => t.length > 2);
-                const matchesObj = candText.includes(targetObjNorm) || (objTokens.length > 0 && objTokens.every(t => candText.includes(t)));
-                if (!matchesObj) return 0;
-                const matchesAttr = candText.includes(targetValNorm) || (el.dataColor && normalize(el.dataColor).includes(targetValNorm));
-                return matchesAttr ? 0.95 : 0;
-              }
-
-              if (labelNorm === targetHint) return 1.0;
-              if (targetHint && (labelNorm.includes(targetHint) || targetHint.includes(labelNorm))) return 0.85;
-              const tokens = targetHint.split(/\s+/).filter(t => t.length > 2);
-              if (tokens.length > 0 && tokens.every(t => labelNorm.includes(t))) return 0.80;
-              return 0;
-            };
-
-            freshElements.forEach((el, idx) => {
-              let s = computeClickScore(el);
-              if (s > 0 && el.isVisualConfirmed) s = Math.min(1.0, s + 0.10);
-              if (s > groundingScore) {
-                groundingScore = s;
-                matchedCandidate = el;
-                matchedCandidateIdx = idx;
-              }
-            });
+              freshElements.forEach((el, idx) => {
+                let s = computeClickScore(el);
+                if (s > 0 && el.isVisualConfirmed) s = Math.min(1.0, s + 0.10);
+                if (s > groundingScore) {
+                  groundingScore = s;
+                  matchedCandidate = el;
+                  matchedCandidateIdx = idx;
+                }
+              });
+            }
           } else if (actionType === "FILL" || actionType === "FILL_FORM") {
             const rawHint = (currentStepPlan && (currentStepPlan.fieldHint || currentStepPlan.targetHint)) ||
               originalAction.targetLabel ||
@@ -3145,13 +3231,15 @@ document.addEventListener("DOMContentLoaded", () => {
                 ? `Navigate to ${currentStepPlan.url}`
                 : `Navigate to ${currentStepPlan.target || currentStepPlan.targetHint || "destination"}`;
               stepFieldPlan = [];
-            } else if (currentStepPlan.type === "CLICK") {
+            } else if (currentStepPlan.type === "CLICK" || currentStepPlan.type === "OPEN") {
               const isSearchResultSelection = !!(
                 currentStepPlan.query ||
                 currentStepPlan.isProductSelection ||
                 (currentStepPlan.targetHint && /result|product|item|listing|video|movie|article|website|site|webpage|page|link/i.test(currentStepPlan.targetHint))
               );
-              if (currentStepPlan.isExplicitTarget && currentStepPlan.explicitTarget) {
+              if (currentStepPlan.targetEntity && currentStepPlan.targetEntity.name) {
+                taskToSend = `Open ${currentStepPlan.targetEntity.name} ${currentStepPlan.targetIntent || "profile"}`;
+              } else if (currentStepPlan.isExplicitTarget && currentStepPlan.explicitTarget) {
                 taskToSend = `Click the result called "${currentStepPlan.explicitTarget}"`;
               } else if (isSearchResultSelection && currentStepPlan.query) {
                 taskToSend = `Select and click the most relevant search result for '${currentStepPlan.query}' (prefer the primary matching listing/website/result, avoid ads or unrelated suggestions)`;
@@ -3527,7 +3615,7 @@ document.addEventListener("DOMContentLoaded", () => {
                 groundingScore: 1.0,
                 groundingMethod: "search-submission-rule"
               };
-            } else if (plannedType === "CLICK") {
+            } else if (plannedType === "CLICK" || plannedType === "OPEN") {
               const isSearchResultSelection = !!(
                 currentStepPlan.query ||
                 currentStepPlan.isProductSelection ||
@@ -3600,6 +3688,25 @@ document.addEventListener("DOMContentLoaded", () => {
                 const candLabel = (agentAction.targetLabel || agentAction.target || "").toLowerCase();
                 if (!candLabel.includes(targetValNorm)) {
                   isCompatibleClick = false; // Discard Gemini suggestion if it doesn't verify the attribute
+                }
+              }
+
+              const resolver = (typeof window !== "undefined" && window.SIHSemanticResolver) || (typeof SIHSemanticResolver !== "undefined" ? SIHSemanticResolver : null);
+              const isSemanticTask = Boolean(
+                resolver && (
+                  currentStepPlan?.isSemantic ||
+                  currentStepPlan?.ranking ||
+                  (currentStepPlan?.ordinal !== null && currentStepPlan?.ordinal !== undefined) ||
+                  currentStepPlan?.spatial ||
+                  currentStepPlan?.semanticCategory ||
+                  resolver.isSemanticInstruction(agentAction?.targetLabel || agentAction?.target || currentStepPlan?.targetHint || currentStepPlan?.rawStepText)
+                )
+              );
+
+              if (isCompatibleClick && isSemanticTask) {
+                const candLabel = (agentAction.targetLabel || agentAction.target || "").toLowerCase();
+                if (resolver.isSemanticInstruction(candLabel) || agentAction.targetIndex === undefined) {
+                  isCompatibleClick = false; // Discard raw semantic phrase to allow semantic grounding
                 }
               }
 
@@ -3741,55 +3848,103 @@ document.addEventListener("DOMContentLoaded", () => {
                 let bestScore = 0;
                 let verifiedAttributeMatches = [];
                 let objectFoundWithoutAttribute = false;
+                let semanticHandled = false;
 
                 const clickCandidates = latestFusedElements || latestVisualElements || [];
-                clickCandidates.forEach((el, idx) => {
+
+                if (resolver && isSemanticTask) {
+                  const semanticRes = resolver.resolveSemanticTarget(currentStepPlan, clickCandidates, {
+                    allElements: clickCandidates,
+                    currentEntity: taskContext?.currentEntity,
+                    taskContext: taskContext
+                  });
+                  if (semanticRes && semanticRes.action !== "PASS_THROUGH") {
+                    agentAction = semanticRes;
+                    semanticHandled = true;
+                    if (semanticRes.action === "CLICK" || semanticRes.action === "OPEN") {
+                      bestIdx = semanticRes.targetIndex !== undefined ? semanticRes.targetIndex : 0;
+                      bestScore = semanticRes.groundingScore || 0.95;
+                    }
+                    if (semanticRes.semanticTargetObject) {
+                      const sto = semanticRes.semanticTargetObject;
+                      const attrEntries = sto.attributes ? Object.entries(sto.attributes).map(([k, v]) => `${k} = ${v}`).join(", ") : "";
+                      const selStr = sto.selector ? `Selector = ${sto.selector.type}${sto.selector.attribute ? ` of ${sto.selector.attribute}` : ""}` : "";
+                      const userIntentText = (taskInput && taskInput.value) ? taskInput.value : (currentStepPlan?.rawStepText || currentStepPlan?.targetHint || "");
+                      appendPlannerTrace(`[USER INTENT] "${userIntentText}"`);
+                      if (semanticRes.targetEntity) {
+                        appendPlannerTrace(`[SEMANTIC TARGET] Entity = ${semanticRes.targetEntity.type || "entity"} (${semanticRes.targetEntity.name}), Intent = ${semanticRes.targetIntent || "open"}`);
+                      } else {
+                        appendPlannerTrace(`[SEMANTIC TARGET] Entity = ${sto.entity || "element"}, Description = ${sto.description || "item"}${attrEntries ? `, ${attrEntries}` : ""}${selStr ? `, ${selStr}` : ""}`);
+                      }
+                      if ((semanticRes.action === "CLICK" || semanticRes.action === "OPEN") && semanticRes.targetLabel) {
+                        appendPlannerTrace(`[GROUNDED ELEMENT] "${semanticRes.targetLabel}" | DOM Index = ${semanticRes.targetIndex} | Confidence = ${Number(semanticRes.groundingScore || 0.94).toFixed(2)} | Method: ${semanticRes.groundingMethod || "semantic + DOM + visual fusion"}`);
+                      }
+                    }
+                  }
+                }
+
+                if (!semanticHandled) {
+                  clickCandidates.forEach((el, idx) => {
+                    if (hasAttributeConstraint) {
+                      const candTextParts = [
+                        el.label,
+                        el.text,
+                        el.ariaLabel,
+                        el.title,
+                        el.alt,
+                        el.dataColor,
+                        el.placeholder
+                      ].filter(Boolean).map(normalize);
+                      const candFullText = candTextParts.join(" ");
+                      const objTokens = targetObjNorm.split(/\s+/).filter(t => t.length > 2);
+                      const matchesObject = candFullText.includes(targetObjNorm) || (objTokens.length > 0 && objTokens.every(t => candFullText.includes(t)));
+                      const matchesAttribute = candFullText.includes(targetValNorm) || (el.dataColor && normalize(el.dataColor).includes(targetValNorm));
+
+                      if (matchesObject && !matchesAttribute) {
+                        objectFoundWithoutAttribute = true;
+                      }
+                      if (matchesObject && matchesAttribute) {
+                        let s = 0.95;
+                        if (el.isVisualConfirmed) s = 1.0;
+                        verifiedAttributeMatches.push({ el, idx, score: s });
+                      }
+                    }
+
+                    let s = computeClickScore(el);
+                    if (s > 0 && el.isVisualConfirmed) {
+                      s = Math.min(1.0, s + 0.10);
+                    }
+                    if (s > bestScore) {
+                      bestScore = s;
+                      bestIdx = idx;
+                    }
+                  });
+
                   if (hasAttributeConstraint) {
-                    const candTextParts = [
-                      el.label,
-                      el.text,
-                      el.ariaLabel,
-                      el.title,
-                      el.alt,
-                      el.dataColor,
-                      el.placeholder
-                    ].filter(Boolean).map(normalize);
-                    const candFullText = candTextParts.join(" ");
-                    const objTokens = targetObjNorm.split(/\s+/).filter(t => t.length > 2);
-                    const matchesObject = candFullText.includes(targetObjNorm) || (objTokens.length > 0 && objTokens.every(t => candFullText.includes(t)));
-                    const matchesAttribute = candFullText.includes(targetValNorm) || (el.dataColor && normalize(el.dataColor).includes(targetValNorm));
-
-                    if (matchesObject && !matchesAttribute) {
-                      objectFoundWithoutAttribute = true;
-                    }
-                    if (matchesObject && matchesAttribute) {
-                      let s = 0.95;
-                      if (el.isVisualConfirmed) s = 1.0;
-                      verifiedAttributeMatches.push({ el, idx, score: s });
-                    }
-                  }
-
-                  let s = computeClickScore(el);
-                  if (s > 0 && el.isVisualConfirmed) {
-                    s = Math.min(1.0, s + 0.10);
-                  }
-                  if (s > bestScore) {
-                    bestScore = s;
-                    bestIdx = idx;
-                  }
-                });
-
-                if (hasAttributeConstraint) {
-                  if (verifiedAttributeMatches.length === 1) {
-                    bestIdx = verifiedAttributeMatches[0].idx;
-                    bestScore = verifiedAttributeMatches[0].score;
-                  } else if (verifiedAttributeMatches.length > 1) {
-                    const ordinal = currentStepPlan?.ordinal;
-                    if (typeof ordinal === "number" && ordinal >= 1 && ordinal <= verifiedAttributeMatches.length) {
-                      bestIdx = verifiedAttributeMatches[ordinal - 1].idx;
-                      bestScore = verifiedAttributeMatches[ordinal - 1].score;
-                    } else {
-                      // Ambiguous attribute targets: multiple matches without distinguishing ordinal/evidence
+                    if (verifiedAttributeMatches.length === 1) {
+                      bestIdx = verifiedAttributeMatches[0].idx;
+                      bestScore = verifiedAttributeMatches[0].score;
+                    } else if (verifiedAttributeMatches.length > 1) {
+                      const ordinal = currentStepPlan?.ordinal;
+                      if (typeof ordinal === "number" && ordinal >= 1 && ordinal <= verifiedAttributeMatches.length) {
+                        bestIdx = verifiedAttributeMatches[ordinal - 1].idx;
+                        bestScore = verifiedAttributeMatches[ordinal - 1].score;
+                      } else {
+                        // Ambiguous attribute targets: multiple matches without distinguishing ordinal/evidence
+                        bestIdx = -1;
+                        bestScore = 0;
+                        agentAction = {
+                          action: "NONE",
+                          target: null,
+                          targetLabel: currentStepPlan.targetHint || currentStepPlan.target,
+                          groundingScore: 0,
+                          groundingMethod: "ambiguous-attribute-targets",
+                          reason: `Target ambiguous: multiple identical '${targetValNorm} ${targetObjNorm}' elements found on page without distinguishing evidence`,
+                          blockedReason: `Multiple '${targetValNorm} ${targetObjNorm}' candidates found on page. Action: BLOCKED`
+                        };
+                      }
+                    } else if (objectFoundWithoutAttribute) {
+                      // Object found, but attribute unverified -> BLOCK
                       bestIdx = -1;
                       bestScore = 0;
                       agentAction = {
@@ -3797,39 +3952,28 @@ document.addEventListener("DOMContentLoaded", () => {
                         target: null,
                         targetLabel: currentStepPlan.targetHint || currentStepPlan.target,
                         groundingScore: 0,
-                        groundingMethod: "ambiguous-attribute-targets",
-                        reason: `Target ambiguous: multiple identical '${targetValNorm} ${targetObjNorm}' elements found on page without distinguishing evidence`,
-                        blockedReason: `Multiple '${targetValNorm} ${targetObjNorm}' candidates found on page. Action: BLOCKED`
+                        groundingMethod: "attribute-not-verified",
+                        reason: `Target attribute not verified: object '${targetObjNorm}' found on current page, but attribute '${targetAttrNorm} = ${targetValNorm}' has insufficient evidence`,
+                        blockedReason: `Object found: ${targetObjNorm}, Requested attribute: ${targetAttrNorm} = ${targetValNorm}, Attribute evidence: insufficient, Confidence: below threshold, Action: BLOCKED`
                       };
                     }
-                  } else if (objectFoundWithoutAttribute) {
-                    // Object found, but attribute unverified -> BLOCK
-                    bestIdx = -1;
-                    bestScore = 0;
-                    agentAction = {
-                      action: "NONE",
-                      target: null,
-                      targetLabel: currentStepPlan.targetHint || currentStepPlan.target,
-                      groundingScore: 0,
-                      groundingMethod: "attribute-not-verified",
-                      reason: `Target attribute not verified: object '${targetObjNorm}' found on current page, but attribute '${targetAttrNorm} = ${targetValNorm}' has insufficient evidence`,
-                      blockedReason: `Object found: ${targetObjNorm}, Requested attribute: ${targetAttrNorm} = ${targetValNorm}, Attribute evidence: insufficient, Confidence: below threshold, Action: BLOCKED`
-                    };
                   }
                 }
 
                 if (bestIdx >= 0 && bestScore >= 0.35) {
-                  const matchedEl = clickCandidates[bestIdx];
-                  agentAction = {
-                    action: "CLICK",
-                    target: matchedEl.label,
-                    targetIndex: matchedEl.index !== undefined ? matchedEl.index : bestIdx,
-                    targetType: matchedEl.type,
-                    targetLabel: matchedEl.label,
-                    groundingScore: bestScore,
-                    groundingMethod: hasAttributeConstraint ? "attribute-verified-grounding" : (matchedEl.isVisualConfirmed ? "dom+visual-fusion" : "local-fuzzy-match")
-                  };
-                } else if (!agentAction || (agentAction.groundingMethod !== "attribute-not-verified" && agentAction.groundingMethod !== "ambiguous-attribute-targets")) {
+                  if (!semanticHandled) {
+                    const matchedEl = clickCandidates[bestIdx];
+                    agentAction = {
+                      action: "CLICK",
+                      target: matchedEl.label,
+                      targetIndex: matchedEl.index !== undefined ? matchedEl.index : bestIdx,
+                      targetType: matchedEl.type,
+                      targetLabel: matchedEl.label,
+                      groundingScore: bestScore,
+                      groundingMethod: hasAttributeConstraint ? "attribute-verified-grounding" : (matchedEl.isVisualConfirmed ? "dom+visual-fusion" : "local-fuzzy-match")
+                    };
+                  }
+                } else if (!agentAction || (agentAction.groundingMethod !== "attribute-not-verified" && agentAction.groundingMethod !== "ambiguous-attribute-targets" && agentAction.groundingMethod !== "ambiguous-semantic-targets")) {
                   // Section 5 Bounded Recovery: Live DOM re-perception before falling back
                   const recoveryPage = await new Promise((r) => {
                     setTimeout(() => {
@@ -3838,26 +3982,50 @@ document.addEventListener("DOMContentLoaded", () => {
                   });
                   if (recoveryPage && Array.isArray(recoveryPage.visualElements)) {
                     latestVisualElements = recoveryPage.visualElements;
-                    (latestVisualElements || []).forEach((el, idx) => {
-                      const s = computeClickScore(el);
-                      if (s > bestScore) {
-                        bestScore = s;
-                        bestIdx = idx;
+                    if (resolver && isSemanticTask) {
+                      const recoverySemantic = resolver.resolveSemanticTarget(currentStepPlan, latestVisualElements, { allElements: latestVisualElements });
+                      if (recoverySemantic && recoverySemantic.action !== "PASS_THROUGH") {
+                        agentAction = recoverySemantic;
+                        semanticHandled = true;
+                        if (recoverySemantic.action === "CLICK") {
+                          bestIdx = recoverySemantic.targetIndex !== undefined ? recoverySemantic.targetIndex : 0;
+                          bestScore = recoverySemantic.groundingScore || 0.95;
+                        }
+                        if (recoverySemantic.semanticTargetObject) {
+                          const sto = recoverySemantic.semanticTargetObject;
+                          const attrEntries = sto.attributes ? Object.entries(sto.attributes).map(([k, v]) => `${k} = ${v}`).join(", ") : "";
+                          const selStr = sto.selector ? `Selector = ${sto.selector.type}${sto.selector.attribute ? ` of ${sto.selector.attribute}` : ""}` : "";
+                          const userIntentText = (taskInput && taskInput.value) ? taskInput.value : (currentStepPlan?.rawStepText || currentStepPlan?.targetHint || "");
+                          appendPlannerTrace(`[USER INTENT] "${userIntentText}"`);
+                          appendPlannerTrace(`[SEMANTIC TARGET] Entity = ${sto.entity || "element"}, Description = ${sto.description || "item"}${attrEntries ? `, ${attrEntries}` : ""}${selStr ? `, ${selStr}` : ""}`);
+                          if (recoverySemantic.action === "CLICK" && recoverySemantic.targetLabel) {
+                            appendPlannerTrace(`[GROUNDED ELEMENT] "${recoverySemantic.targetLabel}" | DOM Index = ${recoverySemantic.targetIndex} | Confidence = ${Number(recoverySemantic.groundingScore || 0.94).toFixed(2)} | Method: ${recoverySemantic.groundingMethod || "semantic + DOM + visual fusion"}`);
+                          }
+                        }
                       }
-                    });
-                    if (bestIdx >= 0 && bestScore >= 0.35) {
-                      const matchedEl = latestVisualElements[bestIdx];
-                      stepRecoveryNote = "Recovered click target after live DOM re-perception";
-                      if (window.SIHEvaluationTracker) window.SIHEvaluationTracker.recordRecovery(stepRecoveryNote);
-                      agentAction = {
-                        action: "CLICK",
-                        target: matchedEl.label,
-                        targetIndex: bestIdx,
-                        targetType: matchedEl.type,
-                        targetLabel: matchedEl.label,
-                        groundingScore: bestScore,
-                        groundingMethod: hasAttributeConstraint ? "attribute-verified-grounding" : "bounded-recovery-match"
-                      };
+                    }
+                    if (!semanticHandled) {
+                      (latestVisualElements || []).forEach((el, idx) => {
+                        const s = computeClickScore(el);
+                        if (s > bestScore) {
+                          bestScore = s;
+                          bestIdx = idx;
+                        }
+                      });
+                      if (bestIdx >= 0 && bestScore >= 0.35) {
+                        const matchedEl = latestVisualElements[bestIdx];
+                        stepRecoveryNote = "Recovered click target after live DOM re-perception";
+                        if (window.SIHEvaluationTracker) window.SIHEvaluationTracker.recordRecovery(stepRecoveryNote);
+                        agentAction = {
+                          action: "CLICK",
+                          target: matchedEl.label,
+                          targetIndex: bestIdx,
+                          targetType: matchedEl.type,
+                          targetLabel: matchedEl.label,
+                          groundingScore: bestScore,
+                          groundingMethod: hasAttributeConstraint ? "attribute-verified-grounding" : "bounded-recovery-match"
+                        };
+                      }
                     }
                   }
 
@@ -4190,7 +4358,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
               if (isExplicit || (isPlannedTask && currentStepPlan && currentStepPlan.type !== "NONE")) {
                 const isAttrBlocked = agentAction?.groundingMethod === "attribute-not-verified";
-                const isAmbiguousBlocked = agentAction?.groundingMethod === "ambiguous-attribute-targets";
+                const isAmbiguousBlocked = agentAction?.groundingMethod === "ambiguous-attribute-targets" || agentAction?.groundingMethod === "ambiguous-semantic-targets";
 
                 if (isAttrBlocked) {
                   if (agentSafetyStatus) agentSafetyStatus.textContent = "BLOCKED (Target attribute not verified)";
@@ -4246,7 +4414,7 @@ document.addEventListener("DOMContentLoaded", () => {
               }
 
               const isAttrBlocked = agentAction?.groundingMethod === "attribute-not-verified";
-              const isAmbiguousBlocked = agentAction?.groundingMethod === "ambiguous-attribute-targets";
+              const isAmbiguousBlocked = agentAction?.groundingMethod === "ambiguous-attribute-targets" || agentAction?.groundingMethod === "ambiguous-semantic-targets";
               executionTraceHistory.push({
                 step: currentStep,
                 totalSteps: isPlannedTask ? totalPlannedSteps : MAX_AGENT_STEPS,
@@ -4981,6 +5149,7 @@ document.addEventListener("DOMContentLoaded", () => {
                   ? `${latestVisualElements.length} visual elements perceived locally`
                   : "DOM perception active",
                 groundingStr: `Label='${agentAction.targetLabel || agentAction.target || "none"}', Role=${agentAction.targetType || "element"}`,
+                semanticDetails: agentAction?.semanticTargetObject ? `Entity: ${agentAction.semanticTargetObject.entity || "element"}, Descr: ${agentAction.semanticTargetObject.description || "item"}${agentAction.semanticTargetObject.attributes ? `, Attrs: ${JSON.stringify(agentAction.semanticTargetObject.attributes)}` : ""}${agentAction.semanticTargetObject.selector ? `, Selector: ${agentAction.semanticTargetObject.selector.type}` : ""}` : null,
                 risk: safetyGate.risk || "LOW",
                 safetyDecision: safetyGate.allowed ? "ALLOWED" : "BLOCKED",
                 humanApproval: safetyGate.requiresApproval ? "GRANTED" : "NOT REQUIRED",
@@ -5146,6 +5315,26 @@ document.addEventListener("DOMContentLoaded", () => {
           // Record evaluation metrics (Section 23)
           lastStepVerification = m21Verification;
           lastExecutedActionType = agentAction ? agentAction.action : null;
+
+          // Update contextual entity memory across actions (Section 1)
+          if (agentAction) {
+            taskContext.previousAction = agentAction.action;
+            if (currentStepPlan && currentStepPlan.targetEntity) {
+              taskContext.currentEntity = currentStepPlan.targetEntity;
+              taskContext.establishedEntities.push(currentStepPlan.targetEntity);
+            } else if (agentAction.action === "FILL" && (agentAction.value || currentStepPlan?.value)) {
+              const val = agentAction.value || currentStepPlan?.value;
+              const fHint = currentStepPlan?.fieldHint || agentAction.targetLabel || "";
+              if (/search|query/i.test(fHint)) {
+                const inferredType = (window.SIHTaskParser && window.SIHTaskParser.inferEntityType) ? window.SIHTaskParser.inferEntityType(val, fHint) : "person";
+                taskContext.currentEntity = { type: inferredType, name: val };
+                taskContext.currentIntent = "search";
+                taskContext.establishedEntities.push(taskContext.currentEntity);
+              }
+            } else if (agentAction.action === "NAVIGATE") {
+              taskContext.currentPage = agentAction.target || agentAction.targetLabel;
+            }
+          }
           if (postPageData && window.SIHChangeDetector && typeof window.SIHChangeDetector.computeLightweightDomSignature === "function") {
             cachedLightweightSignature = window.SIHChangeDetector.computeLightweightDomSignature(
               updatedDom || [],
@@ -5211,6 +5400,7 @@ document.addEventListener("DOMContentLoaded", () => {
             perceptionDecision: lastPerceptionDecision.reason,
             adaptivePerceptionReused: lastPerceptionDecision.reused,
             groundingStr: `Label='${agentAction.targetLabel || agentAction.target || "none"}', Role=${agentAction.targetType || "element"}, Conf=${agentAction.groundingScore !== undefined ? agentAction.groundingScore : 1.0}`,
+            semanticDetails: agentAction?.semanticTargetObject ? `Entity: ${agentAction.semanticTargetObject.entity || "element"}, Descr: ${agentAction.semanticTargetObject.description || "item"}${agentAction.semanticTargetObject.attributes ? `, Attrs: ${JSON.stringify(agentAction.semanticTargetObject.attributes)}` : ""}${agentAction.semanticTargetObject.selector ? `, Selector: ${agentAction.semanticTargetObject.selector.type}` : ""}` : null,
             risk: safetyGate.risk || "LOW",
             safetyDecision: safetyGate.allowed ? (safetyGate.requiresApproval ? "APPROVED" : "ALLOWED") : "BLOCKED",
             humanApproval: safetyGate.requiresApproval ? "GRANTED" : "NOT REQUIRED",

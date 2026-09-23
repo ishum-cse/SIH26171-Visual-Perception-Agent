@@ -305,7 +305,6 @@
           semanticTarget: rawStep.semanticTarget || rawStep.fieldHint,
           expectedRole: rawStep.expectedRole || rawStep.role || "input",
           role: rawStep.role || rawStep.expectedRole || "input",
-          value: rawStep.value || "",
           risk: riskAssessment.risk || riskAssessment.level,
           level: riskAssessment.level,
           requiresApproval: riskAssessment.requiresApproval,
@@ -314,11 +313,11 @@
           postconditions: ["field_value_verified_locally"]
         });
         reasoningTrace.push(`Step ${idx + 1} planned: FILL '${rawStep.fieldHint}' [${riskAssessment.level} Risk - Autonomous]`);
-      } else if (stepType === "CLICK") {
+      } else if (stepType === "CLICK" || stepType === "OPEN") {
         clickCount++;
-        const targetLabel = rawStep.semanticTarget || rawStep.legacyTarget || rawStep.targetHint || "control";
+        const targetLabel = (rawStep.targetEntity && rawStep.targetEntity.name) || rawStep.semanticTarget || rawStep.target || rawStep.legacyTarget || rawStep.targetHint || "control";
         riskAssessment = classifyActionRisk({
-          action: "CLICK",
+          action: rawStep.action || (stepType === "OPEN" ? "OPEN" : "CLICK"),
           targetLabel: targetLabel,
           semanticTag: rawStep.legacyTarget
         });
@@ -340,10 +339,13 @@
           id: idx + 1,
           stepId: idx,
           goalId: rawStep.goalId || null,
-          type: "CLICK",
+          type: rawStep.type || (stepType === "OPEN" ? "OPEN" : "CLICK"),
+          action: rawStep.action || (stepType === "OPEN" ? "OPEN" : "CLICK"),
           target: targetLabel,
           targetHint: targetLabel,
-          semanticTarget: rawStep.semanticTarget || targetLabel,
+          semanticTarget: (rawStep.targetEntity && rawStep.targetEntity.name) || rawStep.semanticTarget || targetLabel,
+          targetEntity: rawStep.targetEntity || null,
+          targetIntent: rawStep.targetIntent || null,
           expectedRole: rawStep.expectedRole || rawStep.role || "button",
           role: rawStep.role || rawStep.expectedRole || "button",
           legacyTarget: rawStep.legacyTarget || null,
@@ -359,16 +361,24 @@
           objectTarget: rawStep.objectTarget || null,
           attribute: rawStep.attribute || null,
           attributeValue: rawStep.attributeValue || null,
+          semanticCategory: rawStep.semanticCategory || null,
+          ranking: rawStep.ranking || null,
+          spatial: rawStep.spatial || null,
+          contentFilter: rawStep.contentFilter || null,
+          referenceTarget: rawStep.referenceTarget || null,
+          isSemantic: !!rawStep.isSemantic,
           risk: requiresApproval ? RISK_LEVELS.HIGH : (riskAssessment.risk || riskAssessment.level),
           level: requiresApproval ? RISK_LEVELS.HIGH : riskAssessment.level,
           requiresApproval: requiresApproval,
-          approvalPrompt: `Execute consequential action: CLICK → ${targetLabel}`,
+          approvalPrompt: `Execute consequential action: ${rawStep.action || "CLICK"} → ${targetLabel}`,
           reasoning: riskAssessment.rationale,
           preconditions: preconditions,
           postconditions: ["page_state_verified"]
         });
         const riskLabel = requiresApproval ? "HIGH Risk - Approval Required" : `${riskAssessment.level} Risk - Autonomous`;
-        if (rawStep.attribute && rawStep.attributeValue) {
+        if (rawStep.targetEntity && rawStep.targetEntity.name) {
+          reasoningTrace.push(`Step ${idx + 1} planned: ${rawStep.action || "OPEN"} '${rawStep.targetEntity.name}' (${rawStep.targetIntent || "target"}) [${riskLabel}]`);
+        } else if (rawStep.attribute && rawStep.attributeValue) {
           reasoningTrace.push(`Step ${idx + 1} planned: CLICK '${targetLabel}' (object='${rawStep.objectTarget}', ${rawStep.attribute}='${rawStep.attributeValue}') [${riskLabel}]`);
         } else {
           reasoningTrace.push(`Step ${idx + 1} planned: CLICK '${targetLabel}' [${riskLabel}]`);

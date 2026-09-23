@@ -53,6 +53,7 @@ function mergeSensitiveRegions(domRegions = [], ocrRegions = [], screenshotWidth
         width: rw,
         height: rh,
         source: r.source || "dom",
+        category: r.category || "DOM",
         scaled: true
       });
     });
@@ -70,6 +71,7 @@ function mergeSensitiveRegions(domRegions = [], ocrRegions = [], screenshotWidth
         width: Math.round(r.width),
         height: Math.round(r.height),
         source: r.source || "ocr",
+        category: r.category || "OCR",
         scaled: true
       });
     });
@@ -102,6 +104,7 @@ function mergeSensitiveRegions(domRegions = [], ocrRegions = [], screenshotWidth
         width: w,
         height: h,
         source: r.source,
+        category: r.category,
         scaled: true
       });
     }
@@ -141,6 +144,7 @@ function mergeSensitiveRegions(domRegions = [], ocrRegions = [], screenshotWidth
           boxA.width = maxX - minX;
           boxA.height = maxY - minY;
           boxA.source = boxA.source === boxB.source ? boxA.source : "merged";
+          boxA.category = boxA.category || boxB.category || "SENSITIVE";
 
           mergedIndices.add(j);
           hasMerged = true;

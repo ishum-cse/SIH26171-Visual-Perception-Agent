@@ -67,12 +67,43 @@
   <h2>SIH 2026 - Agent Perception &amp; Action Test Page</h2>
   <p>This test page demonstrates on-device PII redaction, visual context perception (DOM &amp; screenshot), and safe action execution (CLICK / SCROLL):</p>
   
-  <div class="box">
-    <h3>Synthetic User Profile (PII):</h3>
-    <p>Contact me at test.user@example.com</p>
-    <p>Call me at 9876543210</p>
-    <p>My password is Sup3rSecret!</p>
-    <p>Card number: 4111111111111111</p>
+  <div class="box" style="border-left: 4px solid #059669;">
+    <h3>Synthetic Privacy Redaction Test Section (Categories A–H):</h3>
+    <p style="font-size: 13px; color: #555;">All values below are 100% synthetic mock demonstration values. IRIS detects and redacts these on-device locally before any context leaves your computer:</p>
+    
+    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; font-size: 13px;">
+      <div>
+        <p><strong>Email:</strong> test.user@example.com</p>
+        <p><strong>Phone:</strong> +91 9876543210</p>
+        <p><strong>Password:</strong> Sup3rSecretPass123!</p>
+        <p><strong>Credit Card:</strong> 4111 1111 1111 1111</p>
+        <p><strong>CVV:</strong> 789</p>
+        <p><strong>Bank Account:</strong> 123456789012</p>
+        <p><strong>IFSC:</strong> SBIN0001234</p>
+        <p><strong>UPI ID:</strong> user.demo@okhdfcbank</p>
+      </div>
+      <div>
+        <p><strong>PAN:</strong> ABCDE1234F</p>
+        <p><strong>Aadhaar:</strong> 1234 5678 9012</p>
+        <p><strong>Passport:</strong> Z1234567</p>
+        <p><strong>OTP:</strong> 482910</p>
+        <p><strong>API Key:</strong> sk-live1234567890abcdef123456</p>
+        <p><strong>Bearer Token:</strong> Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.e30.t-IDcSemACt8x4iTMC6Y53iMTZ3WbhSDJ_hzVQGhSw0</p>
+        <p><strong>Employee ID:</strong> EMP-9821</p>
+        <p><strong>Date of Birth:</strong> 15/08/1995</p>
+        <p><strong>Residential Address:</strong> 42 Greenfield Avenue, Bengaluru</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="box" style="border-left: 4px solid #2563eb;">
+    <h3>Ordinary Public &amp; Non-Sensitive Controls (Must Remain Visible):</h3>
+    <p style="font-size: 13px; color: #555;">These controls verify that IRIS does NOT blindly redact generic numbers, public data, prices, or orders:</p>
+    <p><strong>Order ID:</strong> ORD-2026-10452</p>
+    <p><strong>Product Code:</strong> ABC123</p>
+    <p><strong>Price:</strong> ₹1,299</p>
+    <p><strong>Year:</strong> 2026</p>
+    <p><strong>Quantity:</strong> 100</p>
   </div>
 
   <div class="box">

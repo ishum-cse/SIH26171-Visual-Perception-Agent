@@ -1072,6 +1072,10 @@
       <div><strong>OCR sensitive regions:</strong> <span id="agentOcrPiiCount">-</span></div>
       <div><strong>Sensitive regions (Total):</strong> <span id="agentSensitiveCount">-</span></div>
       <div><strong>Redaction:</strong> <span id="agentRedactionStatus">-</span></div>
+      <div id="agentPrivacyCategoryBreakdown" style="display: none; margin: 4px 0; padding: 4px 6px; background: var(--bg-card-elevated); border: 1px solid var(--border-color); border-radius: 4px; font-size: 10px;">
+        <div style="font-weight: 700; color: var(--privacy-emerald); margin-bottom: 2px;">Redaction Category Breakdown:</div>
+        <div id="agentPrivacyCategoryChips" style="display: flex; gap: 4px; flex-wrap: wrap;"></div>
+      </div>
       <div><strong>Sanitized visual context:</strong> <span id="agentSanitizedStatus">Awaiting pipeline</span></div>
       <div style="margin-top: 4px; margin-bottom: 4px;">
         <strong>Raw screenshot:</strong>
@@ -1226,6 +1230,7 @@
   <script src="change-detector.js"></script>
   <script src="action-verifier.js"></script>
   <script src="form-profile.js"></script>
+  <script src="semantic-resolver.js"></script>
   <script src="task-parser.js"></script>
   <script src="reasoning-planner.js"></script>
   <script src="evaluation-tracker.js"></script>
