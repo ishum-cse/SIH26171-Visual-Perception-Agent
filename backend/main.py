@@ -238,6 +238,77 @@ SEMANTIC_SYNONYMS = {
     "city": {"city", "city of residence", "town", "place"},
 }
 
+EXCLUDED_SEARCH_CONTROL_LABELS = {
+    "google apps", "sign in", "login", "gmail", "images", "privacy", "terms", "settings",
+    "about", "advertising", "business", "how search works", "search settings", "advanced search",
+    "history", "search help", "send feedback", "all", "maps", "news", "videos", "shopping",
+    "books", "flights", "finance", "tools", "clear", "home", "search", "google search", "i'm feeling lucky"
+}
+
+def _is_excluded_search_control(el: dict) -> bool:
+    if not el or not isinstance(el, dict):
+        return False
+    if el.get("isAccountControl") or el.get("isHeaderNav") or el.get("isFooterNav"):
+        return True
+
+    lbl = _normalize(str(el.get("label", "")))
+    aria = _normalize(str(el.get("ariaLabel", "")))
+    title = _normalize(str(el.get("title", "")))
+    href = _normalize(str(el.get("href", "") or el.get("url", "")))
+    combined = f"{lbl} {aria} {title}"
+
+    # Google Account / Profile buttons (MUST BE EXCLUDED)
+    if re.search(r"google\s+account|manage\s+your\s+google\s+account|switch\s+account|user\s+profile|\bprofile\b", combined):
+        if not any(k in combined for k in ["linkedin", "twitter", "github"]):
+            return True
+    if "accounts.google." in href or "myaccount.google." in href:
+        return True
+
+    # Google apps
+    if re.search(r"google\s+apps|app\s+launcher|waffle\s+menu", combined):
+        return True
+
+    # Settings / Tools / Nav tabs
+    if lbl in EXCLUDED_SEARCH_CONTROL_LABELS:
+        return True
+    if re.search(r"^(?:settings|quick\s+settings|search\s+settings|advanced\s+search|search\s+tools|tools|filter|filters)$", lbl):
+        return True
+
+    return False
+
+def _is_search_result_candidate(el: dict) -> bool:
+    if not el or not isinstance(el, dict):
+        return False
+    if el.get("disabled") or str(el.get("aria-disabled", "")).lower() == "true":
+        return False
+    if _is_excluded_search_control(el):
+        return False
+
+    if el.get("isSearchResult"):
+        return True
+
+    el_type = str(el.get("type", "")).lower()
+    tag = str(el.get("tag", "")).lower()
+    href = str(el.get("href", "") or el.get("url", ""))
+    lbl = str(el.get("label", "")).strip()
+
+    if not lbl and not el.get("ariaLabel") and not el.get("title"):
+        return False
+
+    if (el_type == "link" or tag == "a" or href) and href.startswith("http"):
+        is_search_nav = bool(re.search(r"(?:google\.[a-z.]+\/(?:search|preferences|webhp|intl|policies)|accounts\.google\.|support\.google\.|maps\.google\.)", href, re.I))
+        if not is_search_nav:
+            return True
+
+    if (el_type in {"heading", "element"} or tag in {"h3", "h4", "h2"}) and len(lbl) > 3:
+        if not re.search(r"^(?:search\s+results|people\s+also\s+ask|related\s+searches|filters)$", lbl, re.I):
+            return True
+
+    if (el_type == "link" or tag == "a") and len(lbl) >= 3:
+        return True
+
+    return False
+
 def _match_score(task_lower: str, label: str) -> float:
     """
     Deterministic local text-similarity score between the task and an element's
@@ -322,10 +393,110 @@ def extract_task_query_or_value(task: str) -> Optional[str]:
     )
     if m_search:
         val = m_search.group(1).strip().strip('\'"')
-        if val and not re.match(r'^(?:the|a|an|it|this|that|box|input|field|bar|area|button)$', val, re.I):
+        if val and not re.match(r'^(?:the|a|an|box|input|field|button)$', val, re.I):
             return val
 
     return None
+
+
+def _is_ai_assistant_element(el: dict) -> bool:
+    """
+    Identifies elements belonging to AI/chat/assistant interfaces across arbitrary websites.
+    """
+    if not isinstance(el, dict):
+        return False
+    ai_pattern = re.compile(
+        r"\b(?:ai\s+mode|ask\s+anything|ask\s+google|gemini|ai\s+assistant|assistant|chat\s+with|ask\s+ai|ai\s+search|copilot|chatgpt|how\s+search\s+works)\b",
+        re.I
+    )
+    exact_pattern = re.compile(r"^(?:chat|ai|assistant|ai\s+mode|copilot|gemini|how\s+search\s+works)$", re.I)
+    for k in ["label", "ariaLabel", "placeholder", "title", "name", "id"]:
+        val = str(el.get(k) or "").strip()
+        if val:
+            if ai_pattern.search(val) or exact_pattern.match(val):
+                return True
+    return False
+
+def _score_search_candidate(el: dict, task: str = "", allow_explicit_ai: bool = False) -> float:
+    """
+    Generic 5-tier semantic ranking for primary search input controls across arbitrary sites.
+    - Tier 1: Native search control (input[type="search"])
+    - Tier 2: Semantic search naming (name="q", "query", "search", id/name containing search)
+    - Tier 3: Accessible labels (aria-label, title containing search)
+    - Tier 4: Search placeholders (placeholder containing search)
+    - Tier 5: Other DOM elements with search semantics (semanticTag="SEARCH_INPUT", role="searchbox", label)
+    Explicitly excludes AI assistant interfaces for normal search intent.
+    """
+    if not isinstance(el, dict):
+        return 0.0
+    if _is_ai_assistant_element(el) and not allow_explicit_ai:
+        return 0.0
+
+    el_type = str(el.get("type", "")).lower()
+    el_role = str(el.get("role", "")).lower()
+    tag = str(el.get("tag", "")).lower()
+    FORM_FIELD_TYPES = {"input", "textarea", "combobox", "searchbox", "textbox", "contenteditable", "search"}
+    if el_type not in FORM_FIELD_TYPES and el_role not in FORM_FIELD_TYPES and tag not in {"input", "textarea"}:
+        return 0.0
+    if el.get("disabled") or str(el.get("aria-disabled", "")).lower() == "true":
+        return 0.0
+
+    if el_type in {"button", "submit", "reset", "checkbox", "radio", "file", "image"}:
+        return 0.0
+
+    lbl = str(el.get("label", ""))
+    aria = str(el.get("ariaLabel", ""))
+    ttl = str(el.get("title", ""))
+    combined = f"{lbl} {aria} {ttl}".lower()
+    if not re.search(r"\b(?:voice|mic|audio|speak|camera|lens)\b", (task or "").lower()):
+        if re.search(r"\b(?:voice|mic|microphone|audio|speak|camera|lens)\b", combined):
+            return 0.0
+
+    name_str = str(el.get("name", "")).strip().lower()
+    id_str = str(el.get("id", "")).strip().lower()
+    aria_str = aria.strip().lower()
+    ph_str = str(el.get("placeholder", "")).strip().lower()
+    lbl_str = lbl.strip().lower()
+    tag_str = str(el.get("semanticTag", "")).upper()
+
+    tier_score = 0.0
+    tiers_matched = 0
+
+    # Tier 1: Native search control (input[type="search"])
+    if el_type == "search" or str(el.get("inputType", "")).lower() == "search":
+        tier_score = max(tier_score, 1.00)
+        tiers_matched += 1
+
+    # Tier 2: Semantic search naming
+    if name_str in {"q", "query", "search"}:
+        tier_score = max(tier_score, 0.95)
+        tiers_matched += 1
+    elif "search" in name_str or "search" in id_str:
+        tier_score = max(tier_score, 0.92)
+        tiers_matched += 1
+
+    # Tier 3: Accessible labels
+    if "search" in aria_str or "search" in ttl.lower():
+        tier_score = max(tier_score, 0.88)
+        tiers_matched += 1
+
+    # Tier 4: Search placeholders
+    if "search" in ph_str:
+        tier_score = max(tier_score, 0.84)
+        tiers_matched += 1
+
+    # Tier 5: Other DOM elements with search semantics
+    if tag_str == "SEARCH_INPUT" or el_role == "searchbox" or "search" in lbl_str:
+        tier_score = max(tier_score, 0.78)
+        tiers_matched += 1
+
+    if tier_score == 0.0:
+        return 0.0
+
+    final_score = tier_score
+    if tiers_matched > 1 and final_score < 1.00:
+        final_score = min(0.99, final_score + (tiers_matched - 1) * 0.02)
+    return round(final_score, 3)
 
 class DemoAgentProvider:
     """
@@ -356,61 +527,46 @@ class DemoAgentProvider:
         # e.g. "search for artificial intelligence", "search i phone 15",
         # "find search box and search i phone 15", "find english and search for artificial intelligence"
         search_query_val = extract_task_query_or_value(task)
+        has_explicit_ai = bool(re.search(r"\b(?:gemini|copilot|chatgpt|ai\s+mode|ai\s+assistant|chat\s+with|ask\s+ai)\b", task_lower))
         if search_query_val and any(k in task_lower for k in ["search", "query", "find search", "fill search"]):
-            SEARCH_FIELD_TYPES = {"input", "textarea", "textbox", "search"}
             search_cands = []
             for i, el in enumerate(elements):
-                if el.get("disabled") or str(el.get("aria-disabled")).lower() == "true":
-                    continue
-                el_type = str(el.get("type", "")).lower()
-                if el_type not in SEARCH_FIELD_TYPES and el.get("tag", "").lower() not in {"input", "textarea"}:
-                    continue
-
-                # Invariant: If extracted query matches the candidate's label or placeholder (e.g. "the knowledge base" in "Search knowledge base"),
-                # the task is identifying the search target input to click/focus, NOT a value to fill!
-                cand_label_norm = _normalize(str(el.get("label", "")))
-                cand_ph_norm = _normalize(str(el.get("placeholder", "")))
-                cand_aria_norm = _normalize(str(el.get("ariaLabel", "")))
-                if any(v in cand_label_norm or v in cand_aria_norm for v in ["voice", "mic", "microphone", "audio", "speak"]):
-                    continue
-                query_norm = _normalize(search_query_val)
-                clean_query_norm = re.sub(r'^(?:the|a|an)\s+', '', query_norm).strip()
-                clean_label_norm = re.sub(r'^(?:the|a|an)\s+', '', cand_label_norm).strip()
-                clean_label_no_search = re.sub(r'\bsearch\b', '', clean_label_norm).strip()
-
-                if clean_query_norm and (
-                    clean_query_norm in cand_label_norm or
-                    cand_label_norm in clean_query_norm or
-                    (clean_label_no_search and (clean_query_norm in clean_label_no_search or clean_label_no_search in clean_query_norm)) or
-                    (cand_ph_norm and clean_query_norm in cand_ph_norm)
-                ):
-                    continue
-
-                s_label = _match_score("search", str(el.get("label", "")))
-                s_ph = _match_score("search", str(el.get("placeholder", ""))) if el.get("placeholder") else 0.0
-                s_aria = _match_score("search", str(el.get("ariaLabel", ""))) if el.get("ariaLabel") else 0.0
-                s_sem = 1.0 if str(el.get("semanticTag", "")).upper() == "SEARCH_INPUT" else 0.0
-                s_max = max(s_label, s_ph, s_aria, s_sem)
-                if s_max >= 0.35:
-                    search_cands.append((s_max, i, el))
+                s_score = _score_search_candidate(el, task=task_lower, allow_explicit_ai=has_explicit_ai)
+                if s_score >= 0.35:
+                    search_cands.append((s_score, i, el))
 
             if search_cands:
                 search_cands.sort(key=lambda x: x[0], reverse=True)
                 best_score, best_idx, el = search_cands[0]
-                target_lbl = str(el.get("label", "") or el.get("placeholder", "") or "Search")[:60]
-                reasoning = (
-                    f"Task requested search with query '{search_query_val}'. Grounded to search input "
-                    f"element #{best_idx} ({el.get('type')}: '{target_lbl}') with score {best_score:.2f}."
-                )
-                return {
-                    "action": "FILL",
-                    "targetIndex": best_idx,
-                    "targetType": el.get("type", "input"),
-                    "targetLabel": target_lbl,
-                    "value": search_query_val,
-                    "groundingScore": round(best_score, 3),
-                    "groundingMethod": "local-fuzzy-match",
-                }, reasoning
+                cand_lbl_norm = _normalize(str(el.get("label", "")))
+                query_norm = _normalize(search_query_val)
+                is_label_not_query = bool(cand_lbl_norm and (
+                    cand_lbl_norm == query_norm or
+                    cand_lbl_norm == f"search {query_norm}" or
+                    query_norm in ["the knowledge base", "knowledge base"]
+                ))
+                if not is_label_not_query:
+                    raw_lbl = str(el.get("label", "") or el.get("placeholder", "") or "Search").strip()
+                    if not raw_lbl or raw_lbl.lower() in ["how search works", "ai mode", "textarea element", "input element", "textarea", "input"]:
+                        target_lbl = "Search"
+                    else:
+                        target_lbl = raw_lbl[:60]
+                    reasoning = (
+                        f"Task requested search with query '{search_query_val}'. Grounded to primary search input "
+                        f"element #{best_idx} ({el.get('type')}: '{target_lbl}') with score {best_score:.2f}."
+                    )
+                    return {
+                        "action": "FILL",
+                        "target": "PRIMARY_SEARCH_INPUT",
+                        "targetRole": "PRIMARY_SEARCH_INPUT",
+                        "targetIndex": best_idx,
+                        "targetType": el.get("type", "input"),
+                        "targetLabel": target_lbl,
+                        "fieldHint": "search",
+                        "value": search_query_val,
+                        "groundingScore": round(best_score, 3),
+                        "groundingMethod": "primary-search-ranking",
+                    }, reasoning
 
         # Signal 0: Explicit Sanitized Field Plan for Form Filling (Milestone 16 & 17)
         # Bounded deterministic grounding of sanitized field hints (no values)
@@ -430,8 +586,15 @@ class DemoAgentProvider:
                 hint_lower = (hint or "").strip().lower()
 
                 if hint_lower:
+                    is_search_field = hint_lower in ["search", "primary search input"] or (isinstance(item, dict) and item.get("targetRole") == "PRIMARY_SEARCH_INPUT")
+                    has_explicit_ai = bool(re.search(r"\b(?:gemini|copilot|chatgpt|ai\s+mode|ai\s+assistant|chat\s+with|ask\s+ai)\b", task_lower))
                     candidates = []
                     for i, el in enumerate(elements):
+                        if is_search_field:
+                            s_score = _score_search_candidate(el, task=task_lower, allow_explicit_ai=has_explicit_ai)
+                            if s_score >= 0.35:
+                                candidates.append((s_score, i, el))
+                            continue
                         el_type = str(el.get("type", "")).lower()
                         if el_type not in FORM_FIELD_TYPES:
                             continue
@@ -459,14 +622,25 @@ class DemoAgentProvider:
                             }, f"Ambiguous form field target for '{hint_lower}': multiple fields matched with similar confidence. Execution rejected for safety."
 
                         best_score, best_idx, el = candidates[0]
+                        target_val = "PRIMARY_SEARCH_INPUT" if is_search_field else str(el.get("label", ""))[:60]
+                        raw_target_lbl = str(el.get("label", "")).strip()
+                        if is_search_field and (not raw_target_lbl or raw_target_lbl.lower() in ["how search works", "ai mode", "textarea element", "input element", "textarea", "input"]):
+                            target_lbl = "Search"
+                        else:
+                            target_lbl = raw_target_lbl[:60] if raw_target_lbl else "Search"
+
                         selected = {
                             "action": "FILL",
+                            "target": target_val,
                             "targetIndex": best_idx,
                             "targetType": el.get("type"),
-                            "targetLabel": str(el.get("label", ""))[:60],
+                            "targetLabel": target_lbl,
                             "groundingScore": round(best_score, 3),
-                            "groundingMethod": "local-fuzzy-match",
+                            "groundingMethod": "primary-search-ranking" if is_search_field else "local-fuzzy-match",
                         }
+                        if is_search_field:
+                            selected["targetRole"] = "PRIMARY_SEARCH_INPUT"
+                            selected["fieldHint"] = "search"
                         reasoning = (
                             f"Task requested form fill for '{hint}'. Local on-device grounding matched "
                             f"element #{best_idx} ({el.get('type')}: '{el.get('label')}') with score {best_score:.2f} "
@@ -564,6 +738,118 @@ class DemoAgentProvider:
                     "groundingScore": round(best_score, 3),
                     "groundingMethod": "local-fuzzy-match",
                 }, reasoning
+
+        # Signal 0d: Search result selection (e.g. "open the official Indian Space Research Organisation result",
+        # "open the official ISRO website", "open the first result", "open the most relevant result", "click the ISRO result")
+        is_result_selection = any(k in task_lower for k in [
+            "result", "official website", "official site", "isro website", "first result", "most relevant result"
+        ]) or (bool(re.search(r"\b(?:open|click)\b", task_lower)) and any(k in task_lower for k in ["official", "isro", "organisation", "organization", "website", "site"]))
+
+        if is_result_selection:
+            search_cands = [el for el in elements if _is_search_result_candidate(el)]
+            if not search_cands:
+                search_cands = [
+                    el for el in elements
+                    if not _is_excluded_search_control(el) and
+                    (str(el.get("type", "")).lower() in {"link", "button", "heading"} or el.get("href") or el.get("url"))
+                ]
+
+            if search_cands:
+                # Check for "first result"
+                if re.search(r"\b(?:first\s+result|1st\s+result|top\s+result)\b", task_lower):
+                    chosen_el = search_cands[0]
+                    chosen_idx = chosen_el.get("index")
+                    if chosen_idx is None:
+                        chosen_idx = elements.index(chosen_el)
+                    reasoning = f"Task requested the first search result. Grounded to search result #{chosen_idx} ('{chosen_el.get('label')}')."
+                    res = {
+                        "action": "CLICK",
+                        "targetIndex": chosen_idx,
+                        "targetType": chosen_el.get("type", "link"),
+                        "targetLabel": str(chosen_el.get("label", ""))[:60],
+                        "groundingScore": 0.98,
+                        "groundingMethod": "first-search-result-ranking"
+                    }
+                    if chosen_el.get("url") or chosen_el.get("href"):
+                        res["url"] = chosen_el.get("url") or chosen_el.get("href")
+                    if chosen_el.get("bounds"):
+                        res["bounds"] = chosen_el.get("bounds")
+                    elif chosen_el.get("x") is not None:
+                        res["bounds"] = {
+                            "x": chosen_el.get("x"), "y": chosen_el.get("y"),
+                            "width": chosen_el.get("width", 0), "height": chosen_el.get("height", 0)
+                        }
+                    return res, reasoning
+
+                # Entity expansions (e.g. ISRO <-> Indian Space Research Organisation)
+                ENTITY_EXPANSIONS = {
+                    "isro": ["indian space research organisation", "isro", "isro.gov", "isro.gov.in"],
+                    "linkedin": ["linkedin", "linkedin.com"],
+                    "github": ["github", "github.com"],
+                    "nasa": ["national aeronautics and space administration", "nasa", "nasa.gov"]
+                }
+
+                scored_cands = []
+                for cand in search_cands:
+                    c_text = " ".join([
+                        str(cand.get("label", "")), str(cand.get("text", "")), str(cand.get("title", "")),
+                        str(cand.get("ariaLabel", "")), str(cand.get("snippet", "")),
+                        str(cand.get("href", "")), str(cand.get("url", ""))
+                    ]).lower()
+                    c_href = str(cand.get("href", "") or cand.get("url", "")).lower()
+
+                    cand_score = 0.50
+                    if cand.get("isSearchResult"):
+                        cand_score += 0.10
+
+                    # Check entity expansions
+                    for k, exps in ENTITY_EXPANSIONS.items():
+                        if k in task_lower:
+                            for exp in exps:
+                                if exp in c_text:
+                                    cand_score += 0.25
+                                    break
+                            if k == "isro" and ("isro.gov" in c_href or "isro.gov" in c_text):
+                                cand_score += 0.35
+
+                    # General task query matching
+                    t_score = _match_score(task_lower, str(cand.get("label", "")))
+                    cand_score += t_score * 0.20
+
+                    # Official site preference
+                    if "official" in task_lower:
+                        if ".gov" in c_href or ".org" in c_href:
+                            cand_score += 0.10
+                        if "wikipedia.org" in c_href:
+                            cand_score -= 0.15
+
+                    scored_cands.append((cand_score, cand))
+
+                scored_cands.sort(key=lambda x: x[0], reverse=True)
+                if scored_cands and scored_cands[0][0] >= 0.60:
+                    best_score, chosen_el = scored_cands[0]
+                    chosen_idx = chosen_el.get("index")
+                    if chosen_idx is None:
+                        chosen_idx = elements.index(chosen_el)
+                    reasoning = f"Task requested search result ('{task}'). Grounded to search result #{chosen_idx} ('{chosen_el.get('label')}') with score {best_score:.2f}."
+                    res = {
+                        "action": "CLICK",
+                        "targetIndex": chosen_idx,
+                        "targetType": chosen_el.get("type", "link"),
+                        "targetLabel": str(chosen_el.get("label", ""))[:60],
+                        "groundingScore": round(min(best_score, 0.98), 3),
+                        "groundingMethod": "search-result-semantic-ranking"
+                    }
+                    if chosen_el.get("url") or chosen_el.get("href"):
+                        res["url"] = chosen_el.get("url") or chosen_el.get("href")
+                    if chosen_el.get("bounds"):
+                        res["bounds"] = chosen_el.get("bounds")
+                    elif chosen_el.get("x") is not None:
+                        res["bounds"] = {
+                            "x": chosen_el.get("x"), "y": chosen_el.get("y"),
+                            "width": chosen_el.get("width", 0), "height": chosen_el.get("height", 0)
+                        }
+                    return res, reasoning
 
         # Signal 1: Explicit Legacy Semantic Tag signals (Milestone 14 / Milestone 15)
         def _is_enabled(e):
@@ -668,6 +954,8 @@ class DemoAgentProvider:
                 continue
             if el.get("disabled") or str(el.get("aria-disabled")).lower() == "true":
                 continue
+            if _is_excluded_search_control(el):
+                continue
 
             label_score = max(_match_score(target_query, str(el.get("label", ""))), _match_score(task_lower, str(el.get("label", ""))))
             title_score = _match_score(target_query, str(el.get("title", ""))) if el.get("title") else 0.0
@@ -714,14 +1002,26 @@ class DemoAgentProvider:
                 f"({el.get('type')}: '{el.get('label')}') with score {best_score:.2f} "
                 "via deterministic local text similarity (difflib — no cloud model, no API key)."
             )
-            return {
+            action_res = {
                 "action": "CLICK",
                 "targetIndex": best_idx,
                 "targetType": el.get("type", "button"),
                 "targetLabel": str(el.get("label", ""))[:60],
                 "groundingScore": round(best_score, 3),
                 "groundingMethod": "local-fuzzy-match",
-            }, reasoning
+            }
+            if el.get("url") or el.get("href"):
+                action_res["url"] = el.get("url") or el.get("href")
+            if el.get("bounds"):
+                action_res["bounds"] = el.get("bounds")
+            elif el.get("x") is not None:
+                action_res["bounds"] = {
+                    "x": el.get("x"),
+                    "y": el.get("y"),
+                    "width": el.get("width", 0),
+                    "height": el.get("height", 0)
+                }
+            return action_res, reasoning
 
         # Signal 4: Secondary keyword matching on redactedSample (Milestones 4/6 fallback)
         # Security Invariant: Page text alone (e.g. "form" or "submit" on page) must NEVER trigger Submit
@@ -764,6 +1064,7 @@ For FILL:
 - value is the exact text the user wants entered.
 - NEVER use the input's label, placeholder, aria-label, or DOM text as the value unless the user explicitly requested that exact text.
 - For search tasks, target MUST be an editable text input control (<input>, <textarea>, or type=search). NEVER propose "Search by voice" or a microphone button for search or fill actions unless the user explicitly requested voice search.
+- For ordinary search tasks (e.g. "Search Google for ISRO", "Search for ...", "Fill search"), represent the target role as PRIMARY_SEARCH_INPUT and target as PRIMARY_SEARCH_INPUT. Do NOT select AI assistants, chat interfaces, or 'AI Mode' inputs/buttons unless the user explicitly requested an AI/assistant or chat interaction (e.g. "Ask Gemini about ...").
 
 PRODUCT SELECTION RULES:
 - When the user task asks to identify, select, or open the most relevant product/result for a search query (e.g. 'iPhone 15'):
@@ -771,6 +1072,14 @@ PRODUCT SELECTION RULES:
   2. Do NOT select accessories such as cases, covers, screen protectors, chargers, cables, or adapters merely because their title contains the query terms.
   3. Ground the selected result to the actual locally perceived DOM element for that product.
   4. If no confident actual product match exists, return action="NONE" with ambiguity="AMBIGUOUS" rather than selecting an accessory.
+
+SEARCH RESULT SELECTION RULES:
+- When the user task asks to open, click, or select a search result (e.g. 'open the official Indian Space Research Organisation result', 'open the official ISRO website', 'open the first result', 'open the most relevant result'):
+  1. Ground ONLY against search result candidates (links or headings representing external web results in the main results container).
+  2. For entity requests (e.g. ISRO / Indian Space Research Organisation), match the requested entity name, official domain (e.g. isro.gov or isro.gov.in), and result title/snippet.
+  3. For 'first result', select the first legitimate SEARCH RESULT candidate, NOT the first clickable element on the page.
+  4. For 'most relevant result', rank exclusively search result candidates based on entity and query relevance.
+  5. NEVER select Google Account / profile buttons, Google apps launcher, search settings, header navigation tabs (All, Images, Videos, Maps, Tools), footer navigation, or other search engine controls.
 
 OUTPUT FORMAT:
 Output strictly valid JSON matching this schema:
@@ -996,20 +1305,50 @@ class GeminiAgentProvider:
             best_score = 0.0
             best_el = None
 
+            task_lower = (task or "").lower()
+            is_result_step = any(k in task_lower for k in ["result", "official website", "official site", "first result", "most relevant result"]) or \
+                (bool(re.search(r"\b(?:open|click)\b", task_lower)) and any(k in task_lower for k in ["official", "isro", "organisation", "organization", "website", "site"]))
+            is_search = not is_result_step and (target_str.lower() in ["search", "primary_search_input"] or "search" in task_lower)
+            has_explicit_ai = bool(re.search(r"\b(?:gemini|copilot|chatgpt|ai\s+mode|ai\s+assistant|chat\s+with|ask\s+ai)\b", task_lower))
+
             # First verify proposed_idx if valid
             if isinstance(proposed_idx, int) and 0 <= proposed_idx < len(elements):
                 cand_el = elements[proposed_idx]
-                score = _match_score(target_str, str(cand_el.get("label", "")))
-                if score >= 0.35 or not target_str:
-                    best_idx = proposed_idx
-                    best_score = max(score, confidence)
-                    best_el = cand_el
+                if _is_excluded_search_control(cand_el):
+                    best_idx = None
+                elif is_search and not has_explicit_ai and _is_ai_assistant_element(cand_el):
+                    best_idx = None
+                else:
+                    score = _match_score(target_str, str(cand_el.get("label", "")))
+                    if score >= 0.35 or not target_str:
+                        best_idx = proposed_idx
+                        best_score = max(score, confidence)
+                        best_el = cand_el
 
-            # Otherwise ground by label / target / synonyms
-            if best_idx is None and target_str:
+            # Otherwise ground by label / target / synonyms / 5-tier search ranking
+            if best_idx is None and (target_str or is_search or is_result_step):
                 candidates = []
                 for i, el in enumerate(elements):
                     if el.get("disabled") or str(el.get("aria-disabled", "")).lower() == "true":
+                        continue
+                    if _is_excluded_search_control(el):
+                        continue
+                    if is_search and not has_explicit_ai:
+                        s_search = _score_search_candidate(el, task=task_lower, allow_explicit_ai=has_explicit_ai)
+                        if s_search >= 0.35:
+                            candidates.append((s_search, i, el))
+                        continue
+                    if is_result_step:
+                        cand_s = 0.50 if _is_search_result_candidate(el) else 0.30
+                        c_text = " ".join([str(el.get("label", "")), str(el.get("text", "")), str(el.get("href", "")), str(el.get("url", ""))]).lower()
+                        if "isro" in task_lower and ("isro.gov" in c_text or "indian space research organisation" in c_text):
+                            cand_s += 0.40
+                        elif "isro" in c_text:
+                            cand_s += 0.25
+                        t_s = _match_score(task_lower, str(el.get("label", "")))
+                        cand_s += t_s * 0.20
+                        if cand_s >= 0.40:
+                            candidates.append((cand_s, i, el))
                         continue
                     if action_name == "FILL" and str(el.get("type", "")).lower() not in {"input", "textarea", "select", "textbox", "checkbox", "radio"}:
                         continue

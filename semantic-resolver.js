@@ -68,8 +68,128 @@
 
   // Common search result nouns
   const RESULT_NOUNS = [
-    "result", "search result", "entry", "hit", "match", "listing"
+    "result", "search result", "official result", "official website", "website", "site",
+    "webpage", "page", "entry", "hit", "match", "listing", "first result", "most relevant result"
   ];
+
+  const HOMEPAGE_NAVIGATION_LABELS = new Set([
+    "google apps", "sign in", "login", "gmail", "images", "privacy", "terms", "settings",
+    "about", "advertising", "business", "how search works", "search settings", "advanced search",
+    "history", "search help", "send feedback", "all", "maps", "news", "videos", "shopping",
+    "books", "flights", "finance", "tools", "clear", "home", "search", "google search", "i'm feeling lucky",
+    "google", "store"
+  ]);
+
+  /**
+   * Identifies non-result elements that MUST be deprioritized or excluded during post-search result selection.
+   * Excludes: Google account/profile buttons, Google apps button, header/footer navigation, search settings, search inputs.
+   */
+  function isExcludedSearchPageControl(el) {
+    if (!el) return false;
+    if (typeof el === "string") {
+      el = { label: el };
+    }
+    if (el.isAccountControl || el.isHeaderNav || el.isFooterNav) return true;
+
+    const labelNorm = normalize(el.label || el.text || el.targetLabel || el.target || "");
+    const ariaNorm = normalize(el.ariaLabel || "");
+    const titleNorm = normalize(el.title || "");
+    const hrefNorm = normalize(el.href || el.url || "");
+    const combined = `${labelNorm} ${ariaNorm} ${titleNorm}`;
+
+    // 1. Google Account / Profile / User buttons & menus (MUST BE EXCLUDED)
+    if (/google\s+account|manage\s+your\s+google\s+account|switch\s+account|user\s+profile|\bprofile\b/i.test(combined) &&
+        !combined.includes("linkedin") && !combined.includes("twitter") && !combined.includes("github")) {
+      return true;
+    }
+    if (hrefNorm.includes("accounts.google.") || hrefNorm.includes("myaccount.google.")) {
+      return true;
+    }
+
+    // 2. Google apps / App launcher (MUST BE EXCLUDED)
+    if (/google\s+apps|app\s+launcher|waffle\s+menu/i.test(combined)) {
+      return true;
+    }
+
+    // 3. Search settings / Quick settings / Tools / Filters / Engine Logo
+    if (HOMEPAGE_NAVIGATION_LABELS.has(labelNorm) || /^(?:google|bing|yahoo|duckduckgo|baidu|yandex|store)$/i.test(labelNorm)) {
+      return true;
+    }
+    if (/^https?:\/\/(?:www\.)?(?:google|bing|yahoo|duckduckgo)\.[a-z.]+\/?(?:[?#]|$)/i.test(hrefNorm) && !hrefNorm.includes("/search")) {
+      return true;
+    }
+    if (/^(?:settings|quick\s+settings|search\s+settings|advanced\s+search|search\s+tools|tools|filter|filters|safesearch|verbatim|any\s+time|all\s+results)$/i.test(labelNorm) ||
+        /\b(?:search\s+settings|quick\s+settings|advanced\s+search|search\s+tools)\b/i.test(combined)) {
+      return true;
+    }
+    if (hrefNorm.includes("google.com/preferences") || hrefNorm.includes("google.com/advanced_search")) {
+      return true;
+    }
+
+    // 4. Header navigation tabs
+    if (/^(?:all|images|videos|news|maps|shopping|books|flights|finance|more|web)$/i.test(labelNorm)) {
+      return true;
+    }
+
+    // 5. Footer navigation / Legal / Support
+    if (/^(?:about|advertising|business|how\s+search\s+works|privacy|terms|privacy\s+policy|terms\s+of\s+service|help|search\s+help|send\s+feedback|consumer\s+information)$/i.test(labelNorm)) {
+      return true;
+    }
+    if (hrefNorm.includes("support.google.com") || hrefNorm.includes("policies.google.com") || hrefNorm.includes("about.google")) {
+      return true;
+    }
+
+    // 6. Search input / Search buttons
+    if (el.semanticTag === "SEARCH_INPUT" || /^(?:search|google\s+search|clear|search\s+by\s+voice|search\s+by\s+image)$/i.test(labelNorm)) {
+      return true;
+    }
+
+    return false;
+  }
+
+  /**
+   * Determines whether an element represents a search-result candidate link/card.
+   */
+  function isSearchResultCandidate(el) {
+    if (!el) return false;
+    if (typeof el === "string") {
+      el = { label: el };
+    }
+    if (el.disabled || String(el["aria-disabled"]).toLowerCase() === "true") return false;
+    if (isExcludedSearchPageControl(el)) return false;
+
+    const elType = (el.type || el.targetType || "").toLowerCase();
+    const tag = (el.tag || el.tagName || "").toLowerCase();
+    const href = el.href || el.url || "";
+    const label = (el.label || el.text || el.targetLabel || el.target || "").trim();
+
+    if (!label && !el.ariaLabel && !el.title) return false;
+
+    // Explicitly flagged by DOM perception in content.js
+    if (el.isSearchResult) return true;
+
+    // External link with valid http/https destination that is not search engine navigation
+    if ((elType === "link" || tag === "a" || href) && /^https?:\/\//i.test(href)) {
+      const isSearchEngineNav = /(?:google\.[a-z.]+(?:\/?$|\/(?:search|preferences|webhp|intl|policies)|[?#])|accounts\.google\.|support\.google\.|maps\.google\.)/i.test(href);
+      if (!isSearchEngineNav) {
+        return true;
+      }
+    }
+
+    // Result heading / title
+    if ((elType === "heading" || elType === "element" || tag === "h3" || tag === "h4" || tag === "h2") && label.length > 3) {
+      if (!/^(?:search\s+results|people\s+also\s+ask|related\s+searches|filters)$/i.test(label)) {
+        return true;
+      }
+    }
+
+    // Link with substantial text (> 3 chars) and not an excluded control
+    if ((elType === "link" || tag === "a") && label.length >= 3) {
+      return true;
+    }
+
+    return false;
+  }
 
   // Common article nouns
   const ARTICLE_NOUNS = [
@@ -189,10 +309,15 @@
     if (/^(?:open|view|visit|see|choose|select)\s+(?:his|her|their|its|that|this|the)\s+(?:profile|product\s+page|page|person|product|item|email|mail|message|post|result|card|listing|link)$/i.test(lower)) return true;
     if (/^(?:open|view|visit|see|choose|select)\s+(?:it|that|this|them)$/i.test(lower)) return true;
 
+    // Search result phrases
+    if (/\b(?:first|most\s+relevant|relevant|official|top)\s+result\b/i.test(lower)) return true;
+    if (/\bofficial\s+(?:website|site|webpage|page|portal)\b/i.test(lower)) return true;
+    if (/\b(?:the\s+)?(?:result|website|site|webpage)\b/i.test(lower) && !lower.includes("how search works")) return true;
+
     return false;
   }
 
-  const CONTEXTUAL_REFERENCE_PATTERN = /^(?:(?:his|her|their|its|this|that|the)\s+)?(?:profile|product(?:\s+page)?|page|item|email|mail|message|post|result|first\s+result|person)$|\b(?:his|her|their|its|that|this|the)\s+(?:profile|product\s+page|page|person|product|item|email|mail|message|post|result|one|card|listing|link)\b|\b(?:his|her|their|its)\s+profile\b|\b(?:this|that|the)\s+person\b|\b(?:its\s+product\s+page|that\s+profile|their\s+profile)\b/i;
+  const CONTEXTUAL_REFERENCE_PATTERN = /^(?:(?:his|her|their|its|this|that|the)\s+)(?:profile|product(?:\s+page)?|page|item|email|mail|message|post|result|first\s+result|person)$|\b(?:his|her|their|its|that|this|the)\s+(?:profile|product\s+page|page|person|product|item|email|mail|message|post|result|one|card|listing|link)\b|\b(?:his|her|their|its)\s+profile\b|\b(?:this|that|the)\s+person\b|\b(?:its\s+product\s+page|that\s+profile|their\s+profile)\b/i;
 
   function isContextualReference(text) {
     if (!text || typeof text !== "string") return false;
@@ -311,7 +436,10 @@
     let category = ITEM_CATEGORIES.GENERIC;
     let objectTarget = null;
 
-    if (PRODUCT_NOUNS.some(n => cleanText.includes(n))) {
+    if (/^(?:start|create|write|open|new)\s+(?:a\s+)?post\b/i.test(cleanText) || /^(?:post|post\s+button)$/i.test(cleanText)) {
+      category = ITEM_CATEGORIES.BUTTON;
+      objectTarget = "button";
+    } else if (PRODUCT_NOUNS.some(n => cleanText.includes(n))) {
       category = ITEM_CATEGORIES.PRODUCT;
       for (const n of PRODUCT_NOUNS) {
         if (cleanText.includes(n)) { objectTarget = n; break; }
@@ -344,6 +472,15 @@
 
     let targetEntity = basePlan.targetEntity || null;
     let targetIntent = basePlan.targetIntent || null;
+
+    if (basePlan.semanticCategory === "person" || basePlan.targetIntent === "profile" || basePlan.targetEntity?.type === "person") {
+      category = ITEM_CATEGORIES.PERSON;
+      objectTarget = "profile";
+    } else if (basePlan.isSearchResult || basePlan.isFirstResult || basePlan.isMostRelevant) {
+      category = ITEM_CATEGORIES.RESULT;
+      if (!objectTarget) objectTarget = "result";
+    }
+
     if (CONTEXTUAL_REFERENCE_PATTERN.test(lower) || /\b(?:his|her|their|its)\s+profile\b/i.test(lower)) {
       if (/\b(?:profile|his|her|their|person)\b/i.test(lower)) {
         category = ITEM_CATEGORIES.PERSON;
@@ -357,6 +494,22 @@
       } else if (/\b(?:result)\b/i.test(lower)) {
         category = ITEM_CATEGORIES.RESULT;
         targetIntent = targetIntent || "result";
+      }
+    }
+
+    // Entity extraction for search-result targets (e.g. "official Indian Space Research Organisation result", "official ISRO website")
+    if (category === ITEM_CATEGORIES.RESULT || basePlan.isSearchResult || /result|website/i.test(lower)) {
+      const officialEntityMatch = lower.match(/(?:official\s+(?:website|site|result|page)\s+(?:of\s+|for\s+)?|official\s+)([a-zA-Z0-9_\-\s]+?)(?:\s+(?:result|website|site|page)|$)/i) ||
+        lower.match(/(?:click|open)\s+(?:the\s+)?([a-zA-Z0-9_\-\s]+?)\s+(?:result|website|site|page)/i);
+      if (officialEntityMatch && !targetEntity) {
+        const entCandidate = officialEntityMatch[1].replace(/^(?:the|an|a)\s+/i, "").trim();
+        if (entCandidate && !["first", "most relevant", "relevant", "best", "official", "search"].includes(entCandidate)) {
+          targetEntity = {
+            type: "organization",
+            name: entCandidate
+          };
+          targetIntent = targetIntent || (/website|site/i.test(lower) ? "official_website" : "official_result");
+        }
       }
     }
 
@@ -446,6 +599,10 @@
       senderFilter ||
       referenceContext ||
       targetEntity ||
+      category === ITEM_CATEGORIES.RESULT ||
+      basePlan.isSearchResult ||
+      basePlan.isFirstResult ||
+      basePlan.isMostRelevant ||
       isContextualReference(phrase) ||
       isSemanticInstruction(phrase)
     );
@@ -682,6 +839,228 @@
     }
 
     const allElements = perceptionContext.allElements || candidates;
+
+    // 1b. DEDICATED SEARCH RESULT CONTEXT RESOLUTION (Step following search submission)
+    const isSearchResultStep = Boolean(
+      (descriptor.category === ITEM_CATEGORIES.RESULT ||
+      currentStepPlan.isSearchResult ||
+      currentStepPlan.isFirstResult ||
+      currentStepPlan.isMostRelevant ||
+      perceptionContext.isSearchResultSelection ||
+      perceptionContext.isPreviousStepSearchSubmit ||
+      /result|official\s+website|official\s+result|first\s+result|most\s+relevant/i.test(rawPhrase)) &&
+      descriptor.category !== ITEM_CATEGORIES.PERSON &&
+      currentStepPlan.targetIntent !== "profile"
+    );
+
+    if (isSearchResultStep) {
+      // Rule 1: Exclude non-result elements (Google Account, Google apps, settings, header/footer nav, search inputs)
+      const nonExcludedCandidates = candidates.filter(el => {
+        if (!el || el.disabled || String(el["aria-disabled"]).toLowerCase() === "true") return false;
+        if (isExcludedSearchPageControl(el)) return false;
+        return true;
+      });
+
+      // Prioritize candidates flagged as search results by DOM perception
+      let searchCandidates = nonExcludedCandidates.filter(el => el.isSearchResult);
+      if (searchCandidates.length === 0) {
+        searchCandidates = nonExcludedCandidates.filter(el => isSearchResultCandidate(el));
+      }
+      if (searchCandidates.length === 0) {
+        // Fallback: any actionable link or heading that is not an excluded control
+        searchCandidates = nonExcludedCandidates.filter(el => {
+          const t = (el.type || el.targetType || "").toLowerCase();
+          const tag = (el.tag || el.tagName || "").toLowerCase();
+          return t === "link" || tag === "a" || t === "heading" || tag === "h3" || tag === "h4" || el.href || el.url;
+        });
+      }
+      if (searchCandidates.length === 0) {
+        searchCandidates = nonExcludedCandidates;
+      }
+
+      if (searchCandidates.length === 0) {
+        return {
+          action: "NONE",
+          target: null,
+          targetIndex: -1,
+          groundingScore: 0,
+          groundingMethod: "target-not-found",
+          reason: "No valid search-result candidates found in results area"
+        };
+      }
+
+      // Check user intent:
+      // Case 1: "open the first result" / ordinal === 1
+      const isFirstResult = descriptor.ordinal === 1 ||
+        currentStepPlan.isFirstResult ||
+        /\b(?:first\s+result|1st\s+result|top\s+result)\b/i.test(rawPhrase);
+
+      if (isFirstResult) {
+        const firstCand = searchCandidates[0];
+        const realIdx = firstCand.index !== undefined ? firstCand.index : candidates.indexOf(firstCand);
+        const concreteLbl = firstCand.label || firstCand.text || firstCand.title || firstCand.ariaLabel || "first search result";
+        return {
+          action: (currentStepPlan.action || currentStepPlan.type || "CLICK").toUpperCase(),
+          target: concreteLbl,
+          targetIndex: realIdx >= 0 ? realIdx : 0,
+          targetType: firstCand.type || "link",
+          targetLabel: concreteLbl,
+          url: firstCand.url || firstCand.href || null,
+          bounds: firstCand.bounds || { x: firstCand.x || 0, y: firstCand.y || 0, width: firstCand.width || 100, height: firstCand.height || 40 },
+          groundingScore: 0.98,
+          groundingMethod: "first-search-result-ranking",
+          concreteElement: firstCand,
+          descriptor: descriptor,
+          semanticTargetObject: descriptor.semanticTargetObject || buildSemanticTargetObject(descriptor, currentStepPlan),
+          targetIntent: "first_result"
+        };
+      }
+
+      // Case 2: Entity / Official result matching (e.g. ISRO, Indian Space Research Organisation)
+      const requestedEntity = currentStepPlan.targetEntity || descriptor.targetEntity || perceptionContext.currentEntity || null;
+      const entityName = requestedEntity ? (requestedEntity.name || "") : "";
+      const isOfficialRequested = Boolean(
+        currentStepPlan.targetIntent === "official_website" ||
+        currentStepPlan.targetIntent === "official_result" ||
+        descriptor.targetIntent === "official_website" ||
+        descriptor.targetIntent === "official_result" ||
+        /\bofficial\b/i.test(rawPhrase) ||
+        /\bwebsite\b/i.test(rawPhrase)
+      );
+
+      // Known entity synonyms and official domains dictionary
+      const ENTITY_EXPANSIONS = {
+        isro: ["indian space research organisation", "isro", "isro.gov", "isro.gov.in"],
+        "indian space research organisation": ["indian space research organisation", "isro", "isro.gov", "isro.gov.in"],
+        linkedin: ["linkedin", "linkedin.com"],
+        github: ["github", "github.com"],
+        nasa: ["national aeronautics and space administration", "nasa", "nasa.gov"],
+        google: ["google", "google.com"]
+      };
+
+      const queryNorm = normalize(currentStepPlan.query || "");
+      const entityNorm = normalize(entityName || "");
+      const domainHint = currentStepPlan.domain ||
+        (currentStepPlan.targetHint && (currentStepPlan.targetHint.match(/\(([^)]+\.[a-z]{2,})\)/i)?.[1] || currentStepPlan.targetHint.match(/\b([a-zA-Z0-9_\-]+\.[a-zA-Z]{2,})\b/i)?.[1])) ||
+        null;
+
+      // Extract search target terms
+      const searchTerms = [entityNorm, queryNorm, rawPhrase].filter(Boolean);
+      let expansions = [];
+      for (const st of searchTerms) {
+        for (const [key, expList] of Object.entries(ENTITY_EXPANSIONS)) {
+          if (st.includes(key) || key.includes(st)) {
+            expansions.push(...expList);
+          }
+        }
+      }
+      expansions = [...new Set(expansions)];
+
+      // Rank search result candidates
+      const scoredCandidates = searchCandidates.map((cand, candPos) => {
+        const textParts = [
+          cand.label,
+          cand.text,
+          cand.title,
+          cand.ariaLabel,
+          cand.snippet,
+          cand.href,
+          cand.url
+        ].filter(Boolean).map(normalize);
+        const fullCandText = textParts.join(" ");
+        const hrefNorm = normalize(cand.href || cand.url || "");
+
+        let score = 0.50; // Base score for being a valid search-result candidate
+
+        // High priority: Explicit DOM search result flag from content.js
+        if (cand.isSearchResult) {
+          score += 0.10;
+        }
+
+        // Domain hint match (e.g. isro.gov.in, isro.gov)
+        if (domainHint && (hrefNorm.includes(normalize(domainHint)) || fullCandText.includes(normalize(domainHint)))) {
+          score += 0.35;
+        } else if (/\bisro\.gov(?:\.in)?\b/i.test(hrefNorm) || /\bisro\.gov(?:\.in)?\b/i.test(fullCandText)) {
+          score += 0.35;
+        }
+
+        // Entity / Acronym expansions match
+        if (expansions.length > 0) {
+          let expansionMatched = false;
+          for (const exp of expansions) {
+            if (fullCandText.includes(exp)) {
+              score += 0.25;
+              expansionMatched = true;
+              break;
+            }
+          }
+          if (!expansionMatched && entityNorm) {
+            const entTokens = entityNorm.split(/\s+/).filter(t => t.length > 2 && !["official", "website", "the", "page", "result"].includes(t));
+            if (entTokens.length > 0 && entTokens.every(t => fullCandText.includes(t))) {
+              score += 0.20;
+            }
+          }
+        } else if (queryNorm && fullCandText.includes(queryNorm)) {
+          score += 0.20;
+        }
+
+        // Official website preference
+        if (isOfficialRequested) {
+          if (hrefNorm.includes(".gov") || hrefNorm.includes(".org") || hrefNorm.includes(".edu") || /official/i.test(cand.label || "")) {
+            score += 0.10;
+          }
+          // Avoid Wikipedia when official site is requested
+          if (hrefNorm.includes("wikipedia.org") || (cand.label || "").toLowerCase().includes("wikipedia")) {
+            score -= 0.15;
+          }
+        }
+
+        // Surrounding snippet relevance
+        if (cand.snippet) {
+          const snipNorm = normalize(cand.snippet);
+          if (expansions.some(exp => snipNorm.includes(exp)) || (queryNorm && snipNorm.includes(queryNorm))) {
+            score += 0.05;
+          }
+        }
+
+        // Result position prior: earlier results preferred over later results
+        const posPenalty = Math.min(candPos * 0.01, 0.05);
+        score -= posPenalty;
+
+        return {
+          cand,
+          score,
+          pos: candPos
+        };
+      });
+
+      scoredCandidates.sort((a, b) => b.score - a.score);
+
+      const topResult = scoredCandidates[0];
+      const selectedEl = topResult.cand;
+      const realIdx = selectedEl.index !== undefined ? selectedEl.index : candidates.indexOf(selectedEl);
+      const concreteLbl = selectedEl.label || selectedEl.text || selectedEl.title || selectedEl.ariaLabel || descriptor.rawPhrase;
+
+      const actionType = (currentStepPlan.action || currentStepPlan.type || "CLICK").toUpperCase();
+      const finalScore = Math.min(Math.max(topResult.score, 0.95), 0.99);
+
+      return {
+        action: actionType,
+        target: concreteLbl,
+        targetIndex: realIdx >= 0 ? realIdx : 0,
+        targetType: selectedEl.type || "link",
+        targetLabel: concreteLbl,
+        url: selectedEl.url || selectedEl.href || null,
+        bounds: selectedEl.bounds || { x: selectedEl.x || 0, y: selectedEl.y || 0, width: selectedEl.width || 100, height: selectedEl.height || 40 },
+        groundingScore: finalScore,
+        groundingMethod: "search-result-semantic-ranking",
+        concreteElement: selectedEl,
+        descriptor: descriptor,
+        semanticTargetObject: descriptor.semanticTargetObject || buildSemanticTargetObject(descriptor, currentStepPlan),
+        targetEntity: requestedEntity || (entityName ? { name: entityName } : null),
+        targetIntent: currentStepPlan.targetIntent || descriptor.targetIntent || (isOfficialRequested ? "official_website" : "search_result")
+      };
+    }
 
     // 2. Identify candidate elements matching Category / Role / Interactive structure
     let matchingCandidates = candidates.filter((el) => {
@@ -1064,6 +1443,8 @@
     extractRating,
     extractRecencyScore,
     filterBySpatialRelation,
+    isExcludedSearchPageControl,
+    isSearchResultCandidate,
     ITEM_CATEGORIES
   };
 });

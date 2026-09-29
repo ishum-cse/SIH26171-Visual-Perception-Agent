@@ -333,6 +333,31 @@ function detectSensitiveOcrRegions(ocrData) {
     }
   });
 
+  // 1b. Multi-line label-value correlation (e.g. Line i: 'Employee ID:', Line i+1: 'NXT-2609307')
+  for (let i = 0; i < lines.length - 1; i++) {
+    const lineA = lines[i];
+    const lineB = lines[i + 1];
+    if (!lineA || !lineB || !lineA.text || !lineB.text) continue;
+    const combined = `${lineA.text}: ${lineB.text}`;
+    const checkA = inspectTextSensitivity(lineA.text);
+    if (!checkA.sensitive) {
+      const checkCombined = inspectTextSensitivity(combined);
+      if (checkCombined.sensitive) {
+        if (lineB.width > 0 && lineB.height > 0) {
+          regions.push({
+            x: lineB.x,
+            y: lineB.y,
+            width: lineB.width,
+            height: lineB.height,
+            source: "ocr",
+            category: checkCombined.category || "SENSITIVE",
+            scaled: true
+          });
+        }
+      }
+    }
+  }
+
   // 2. Standalone word scan for any single-word matches not captured by line grouping
   words.forEach((w) => {
     if (w && w.text) {

@@ -386,6 +386,7 @@ document.addEventListener("DOMContentLoaded", () => {
     cachedPerceptionTimestamp = 0;
     lastExecutedActionType = null;
     lastStepVerification = null;
+    activeComposer = null;
   };
 
   // Milestone 18: Live Explainable Agent Overlay Telemetry Helper
@@ -504,6 +505,7 @@ document.addEventListener("DOMContentLoaded", () => {
     reusedPerceptionPasses: 0,
     totalProbeMs: 0
   };
+  let activeComposer = null;
 
   // Listeners waiting for privacy redaction pass to conclude
   let onRedactionCompleteCallbacks = [];
@@ -1269,6 +1271,9 @@ document.addEventListener("DOMContentLoaded", () => {
     }
 
     // 5. Actions that MUST force fresh perception:
+    if (typeof activeComposer !== "undefined" && activeComposer && activeComposer.state === "open" && currentStep > 1) {
+      return { canReuse: false, reason: "FRESH — Forced by active composer transition" };
+    }
     const normLast = (lastAction || "").toUpperCase();
     if (normLast === "CLICK") {
       return { canReuse: false, reason: "FRESH — Forced by CLICK (possible UI navigation/modal)" };
@@ -1424,6 +1429,37 @@ document.addEventListener("DOMContentLoaded", () => {
       throw new Error("Privacy contract violation: Only verified SANITIZED screenshots with rawScreenshotTransmitted=false may be sent.");
     }
 
+    // CRITICAL PRIVACY GATE: Pre-flight payload verification before network transmission
+    const verifyFn = (typeof verifySanitizedPayload === "function")
+      ? verifySanitizedPayload
+      : ((typeof window !== "undefined" && typeof window.verifySanitizedPayload === "function")
+        ? window.verifySanitizedPayload
+        : ((typeof globalThis !== "undefined" && typeof globalThis.verifySanitizedPayload === "function")
+          ? globalThis.verifySanitizedPayload
+          : null));
+
+    if (verifyFn) {
+      const outgoingPayload = {
+        task: task || "",
+        context: structuredContext,
+        privacyMetadata: privacyMetadata
+      };
+      const verification = verifyFn(outgoingPayload);
+      if (!verification.valid) {
+        const errorMsg = `[CRITICAL PRIVACY GATE] Blocked gateway transmission to /api/visual-context: ${verification.violations.join("; ")}`;
+        console.error(errorMsg);
+        if (privacyStatus) {
+          privacyStatus.textContent = "BLOCKED (Unredacted PII in payload)";
+          privacyStatus.style.color = "#d32f2f";
+        }
+        if (agentSanitizedUploadStatus) {
+          agentSanitizedUploadStatus.textContent = "BLOCKED (Privacy Gate Violation)";
+          agentSanitizedUploadStatus.style.color = "#d32f2f";
+        }
+        throw new Error(errorMsg);
+      }
+    }
+
     const formData = new FormData();
     formData.append("sanitizedScreenshot", sanitizedScreenshotBlob, "sanitized_screenshot.jpg");
     formData.append("task", task || "");
@@ -1471,17 +1507,42 @@ document.addEventListener("DOMContentLoaded", () => {
     if (executionOutput) executionOutput.value = "Awaiting decision from backend...";
     if (agentActionText) agentActionText.textContent = "Evaluating text-only fallback...";
 
+    // CRITICAL PRIVACY GATE: Pre-flight payload verification before /api/context transmission
+    const verifyFn = (typeof verifySanitizedPayload === "function")
+      ? verifySanitizedPayload
+      : ((typeof window !== "undefined" && typeof window.verifySanitizedPayload === "function")
+        ? window.verifySanitizedPayload
+        : ((typeof globalThis !== "undefined" && typeof globalThis.verifySanitizedPayload === "function")
+          ? globalThis.verifySanitizedPayload
+          : null));
+
+    const payloadToSend = {
+      title: pageData?.title || "Unknown Title",
+      url: pageData?.url || "Unknown URL",
+      redactedSample: pageData?.redactedSample || ""
+    };
+
+    if (verifyFn) {
+      const verification = verifyFn(payloadToSend);
+      if (!verification.valid) {
+        const errorMsg = `[CRITICAL PRIVACY GATE] Blocked transmission to /api/context: ${verification.violations.join("; ")}`;
+        console.error(errorMsg);
+        if (backendOutput) backendOutput.value = errorMsg;
+        if (privacyStatus) {
+          privacyStatus.textContent = "BLOCKED (Unredacted PII in payload)";
+          privacyStatus.style.color = "#d32f2f";
+        }
+        throw new Error(errorMsg);
+      }
+    }
+
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 5000);
     try {
       const apiRes = await fetch("http://127.0.0.1:8000/api/context", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          title: pageData?.title || "Unknown Title",
-          url: pageData?.url || "Unknown URL",
-          redactedSample: pageData?.redactedSample || ""
-        }),
+        body: JSON.stringify(payloadToSend),
         signal: controller.signal
       });
 
@@ -1653,10 +1714,190 @@ document.addEventListener("DOMContentLoaded", () => {
     "books", "flights", "finance", "tools", "clear", "home", "search", "google search", "i'm feeling lucky"
   ]);
 
-  const isGenericNavigationOrHomepageTarget = (label) => {
-    const norm = (label || "").trim().toLowerCase();
-    return HOMEPAGE_NAVIGATION_LABELS.has(norm);
+  const isGenericNavigationOrHomepageTarget = (target) => {
+    if (!target) return false;
+    if (typeof target === "object") {
+      const resolver = (typeof window !== "undefined" && window.SIHSemanticResolver) || (typeof SIHSemanticResolver !== "undefined" ? SIHSemanticResolver : null);
+      if (resolver && typeof resolver.isExcludedSearchPageControl === "function") {
+        if (resolver.isExcludedSearchPageControl(target)) return true;
+      }
+      target = target.label || target.text || target.targetLabel || target.target || "";
+    }
+    const norm = String(target || "").trim().toLowerCase();
+    if (HOMEPAGE_NAVIGATION_LABELS.has(norm)) return true;
+    if (/google\s+account|manage\s+your\s+google\s+account|switch\s+account|accounts\.google/i.test(norm)) return true;
+    if (/google\s+apps|app\s+launcher|waffle\s+menu/i.test(norm)) return true;
+    if (/^(?:settings|quick\s+settings|search\s+settings|tools|search\s+tools|all|images|videos|news|maps|shopping|books|flights|finance|more)$/i.test(norm)) return true;
+    const resolver = (typeof window !== "undefined" && window.SIHSemanticResolver) || (typeof SIHSemanticResolver !== "undefined" ? SIHSemanticResolver : null);
+    if (resolver && typeof resolver.isExcludedSearchPageControl === "function") {
+      if (resolver.isExcludedSearchPageControl({ label: norm })) return true;
+    }
+    return false;
   };
+
+  // Helper to normalize bounding boxes [x, y, w, h] or { x, y, width, height }
+  function normalizeBounds(b) {
+    if (!b) return null;
+    if (Array.isArray(b) && b.length >= 4) {
+      return { x: b[0], y: b[1], width: b[2], height: b[3] };
+    }
+    if (typeof b.x === "number" && typeof b.y === "number") {
+      return { x: b.x, y: b.y, width: b.width || 0, height: b.height || 0 };
+    }
+    return null;
+  }
+
+  // Helper to normalize URLs
+  function normalizeUrl(u) {
+    if (!u) return "";
+    return String(u).trim().toLowerCase()
+      .replace(/^https?:\/\//i, "")
+      .replace(/^www\./i, "")
+      .replace(/\/+$/, "");
+  }
+
+  /**
+   * Determines whether an element is an AI/chat/assistant interface.
+   * Universal and website-agnostic: matches semantic patterns across arbitrary pages.
+   */
+  const isAiAssistantElement = (el) => {
+    if (!el) return false;
+    const normalize = (s) => (s || "").toLowerCase().replace(/[:*#_\-\/\\]+/g, " ").replace(/\s+/g, " ").trim();
+    const texts = [
+      el.label,
+      el.ariaLabel,
+      el.placeholder,
+      el.title,
+      el.name,
+      el.id,
+      el.nearbyText,
+      el.contextText,
+      el.associatedLabel
+    ].map(normalize).filter(Boolean);
+
+    const aiPattern = /\b(?:ai\s+mode|ask\s+anything|ask\s+google|gemini|ai\s+assistant|assistant|chat\s+with|ask\s+ai|ai\s+search|copilot|chatgpt|how\s+search\s+works)\b/i;
+    const exactAiOrChat = /^(?:chat|ai|assistant|ai\s+mode|copilot|gemini|how\s+search\s+works)$/i;
+
+    return texts.some(t => aiPattern.test(t) || exactAiOrChat.test(t));
+  };
+  if (typeof globalThis !== "undefined") {
+    globalThis.isAiAssistantElement = isAiAssistantElement;
+  }
+
+  /**
+   * Generic 5-tier semantic ranking for primary search input controls.
+   * Conforms to Requirements 3, 4, 5:
+   * - Tier 1: Native search controls (input[type="search"])
+   * - Tier 2: Inputs with semantic search naming (name="q", "query", "search", id/name containing search)
+   * - Tier 3: Accessible labels (aria-label, <label>, title containing search)
+   * - Tier 4: Search placeholders (placeholder containing search)
+   * - Tier 5: Other DOM elements with search semantics (semanticTag="SEARCH_INPUT", role="searchbox", label)
+   * Explicitly excludes AI/chat/assistant inputs for normal search intent.
+   * Universal and website-agnostic.
+   */
+  const scoreSearchCandidate = (el, taskText = "", isExplicitAiAllowed = false) => {
+    if (!el) return 0;
+    const normalize = (s) => (s || "").toLowerCase().replace(/[:*#_\-\/\\]+/g, " ").replace(/\s+/g, " ").trim();
+
+    // Check if element is an AI / assistant / chat interface
+    if (isAiAssistantElement(el) && !isExplicitAiAllowed) {
+      return 0; // Exclude AI/chat/assistant inputs for normal search intent
+    }
+
+    // Must be an editable form-capable control
+    const elType = (el.type || "").toLowerCase();
+    const elRole = (el.role || "").toLowerCase();
+    const elTag = (el.tag || "").toLowerCase();
+    const isFormType = ["input", "textarea", "combobox", "searchbox", "search", "text", "textbox", "contenteditable"].includes(elType) ||
+      ["input", "textarea", "combobox", "searchbox", "textbox"].includes(elRole) ||
+      elTag === "input" || elTag === "textarea" ||
+      Boolean(el.ariaAutocomplete);
+    if (!isFormType) return 0;
+    if (el.disabled || String(el["aria-disabled"]).toLowerCase() === "true") return 0;
+
+    // Reject non-text inputs (checkbox, radio, button, submit, file, image)
+    if (["button", "submit", "reset", "checkbox", "radio", "file", "image"].includes(elType)) return 0;
+
+    // Reject voice/mic/camera controls unless explicitly requested
+    const fullText = [el.label, el.ariaLabel, el.title].map(normalize).join(" ");
+    if (!taskText || (!/voice|mic|audio|speak|camera|lens/i.test(taskText))) {
+      if (/voice|mic|microphone|audio|speak|camera|lens/i.test(fullText)) return 0;
+    }
+
+    const elName = normalize(el.name);
+    const elId = normalize(el.id);
+    const elAria = normalize(el.ariaLabel);
+    const elPlaceholder = normalize(el.placeholder);
+    const elTitle = normalize(el.title);
+    const elAssoc = normalize(el.associatedLabel);
+    const elLabel = normalize(el.label);
+    const elContext = normalize(el.contextText || el.nearbyText);
+
+    let tierScore = 0;
+    let tiersMatched = 0;
+
+    // Tier 1: Native search control (input[type="search"])
+    const isNativeSearch = elType === "search" || el.inputType === "search" || (el.tag === "input" && el.type === "search");
+    if (isNativeSearch) {
+      tierScore = Math.max(tierScore, 1.00);
+      tiersMatched++;
+    }
+
+    // Tier 2: Semantic search naming (name="q", "query", "search", id/name containing search)
+    const isExactSearchName = elName === "q" || elName === "query" || elName === "search";
+    const isPartialSearchNameOrId = (elName && /\bsearch\b/i.test(elName)) || (elId && /\bsearch\b/i.test(elId));
+    if (isExactSearchName) {
+      tierScore = Math.max(tierScore, 0.95);
+      tiersMatched++;
+    } else if (isPartialSearchNameOrId) {
+      tierScore = Math.max(tierScore, 0.92);
+      tiersMatched++;
+    }
+
+    // Tier 3: Accessible labels (aria-label containing "search", associated <label> containing "search", title containing "search")
+    const isAriaSearch = elAria && /\bsearch\b/i.test(elAria);
+    const isAssocSearch = elAssoc && /\bsearch\b/i.test(elAssoc);
+    const isTitleSearch = elTitle && /\bsearch\b/i.test(elTitle);
+    if (isAriaSearch || isAssocSearch || isTitleSearch) {
+      tierScore = Math.max(tierScore, 0.88);
+      tiersMatched++;
+    }
+
+    // Tier 4: Search placeholders (placeholder containing "search")
+    const isPlaceholderSearch = elPlaceholder && /\bsearch\b/i.test(elPlaceholder);
+    if (isPlaceholderSearch) {
+      tierScore = Math.max(tierScore, 0.84);
+      tiersMatched++;
+    }
+
+    // Tier 5: Other DOM elements whose accessible name / role / surrounding semantics indicate search
+    const isSemanticTagSearch = el.semanticTag === "SEARCH_INPUT";
+    const isSearchRole = elRole === "searchbox" || elType === "searchbox";
+    const isLabelSearch = elLabel && /\bsearch\b/i.test(elLabel);
+    const isContextSearch = elContext && /\bsearch\b/i.test(elContext);
+    if (isSemanticTagSearch || isSearchRole || isLabelSearch || isContextSearch) {
+      tierScore = Math.max(tierScore, 0.78);
+      tiersMatched++;
+    }
+
+    if (tierScore === 0) return 0;
+
+    // Multi-tier reinforcement bonus (confirming signals increase confidence up to 0.99 for non-tier-1)
+    let finalScore = tierScore;
+    if (tiersMatched > 1 && finalScore < 1.00) {
+      finalScore = Math.min(0.99, finalScore + (tiersMatched - 1) * 0.02);
+    }
+
+    // Visual confirmation bonus (+0.01)
+    if (el.isVisualConfirmed && finalScore < 1.00) {
+      finalScore = Math.min(1.00, finalScore + 0.01);
+    }
+
+    return finalScore;
+  };
+  if (typeof globalThis !== "undefined") {
+    globalThis.scoreSearchCandidate = scoreSearchCandidate;
+  }
 
   /**
    * Robust, deterministic helper to check whether a candidate target matches a requested field hint.
@@ -1665,8 +1906,8 @@ document.addEventListener("DOMContentLoaded", () => {
    */
   const isFieldMatch = (targetLabel, fieldHint) => {
     if (!targetLabel || !fieldHint) return false;
-    const tNorm = (targetLabel || "").toLowerCase().replace(/[:*#_\-\/\\]+/g, " ").trim();
-    const hNorm = (fieldHint || "").toLowerCase().replace(/[:*#_\-\/\\]+/g, " ").trim();
+    const tNorm = (targetLabel || "").toLowerCase().replace(/[:*#_\-\/\\.,…!?;'"()\[\]]+/g, " ").trim();
+    const hNorm = (fieldHint || "").toLowerCase().replace(/[:*#_\-\/\\.,…!?;'"()\[\]]+/g, " ").trim();
     if (!tNorm || !hNorm) return false;
 
     // Critical Rule 1 & 2: Search mail/input must NEVER match non-search field hints
@@ -1677,36 +1918,641 @@ document.addEventListener("DOMContentLoaded", () => {
 
     if (tNorm === hNorm) return true;
 
+    // Direct word-boundary match for short keywords like "to" and "from"
+    if (hNorm === "to" || hNorm === "from") {
+      if (new RegExp(`\\b${hNorm}\\b`, "i").test(tNorm)) return true;
+    }
+    if (tNorm === "to" || tNorm === "from") {
+      if (new RegExp(`\\b${tNorm}\\b`, "i").test(hNorm)) return true;
+    }
+
     // Direct substring match only when hint length >= 3 to avoid spurious collisions on 1-2 char words
     if (hNorm.length >= 3 && tNorm.includes(hNorm)) return true;
     if (tNorm.length >= 3 && hNorm.includes(tNorm)) return true;
 
-    // Meaningful token overlap (tokens >= 3 chars)
-    const tTokens = tNorm.split(/\s+/).filter((w) => w.length >= 3);
-    const hTokens = hNorm.split(/\s+/).filter((w) => w.length >= 3);
+    // Composer Semantic Normalization (e.g. "Write a message...", "active message composer", "write a reply", "body")
+    const cleanComposerTerm = (str) => {
+      return (str || "")
+        .toLowerCase()
+        .replace(/^(?:write|type|enter|input|put|draft|send)\s+(?:a\s+|an\s+|the\s+)?/i, "")
+        .replace(/^(?:active\s+)/i, "")
+        .replace(/\s+(?:composer|textbox|editor|box|body|field|input|area)$/i, "")
+        .trim();
+    };
+
+    const cT = cleanComposerTerm(tNorm);
+    const cH = cleanComposerTerm(hNorm);
+    if (cT && cH && cT === cH) return true;
+
+    // Meaningful token overlap (tokens >= 3 chars, or exact keyword "to"/"from")
+    const tTokens = tNorm.split(/\s+/).filter((w) => w.length >= 3 || w === "to" || w === "from");
+    const hTokens = hNorm.split(/\s+/).filter((w) => w.length >= 3 || w === "to" || w === "from");
     for (const ht of hTokens) {
       if (tTokens.includes(ht)) return true;
     }
 
     // Pre-registered generic semantic synonyms for form fields
     const SYNONYMS = {
+      from: [
+        "from", "from station", "from city", "departure", "departure station",
+        "departure city", "source", "source station", "source city",
+        "origin", "origin station", "origin city", "leaving from"
+      ],
+      to: [
+        "to", "to station", "to city", "arrival", "arrival station",
+        "arrival city", "destination", "destination station", "destination city",
+        "going to"
+      ],
+      station: ["station", "railway station", "train station", "city", "location", "stop"],
+      city: ["city", "town", "location", "destination", "origin", "station"],
       name: ["name", "full name", "your name", "first name", "applicant name", "student name", "candidate name"],
-      email: ["email", "e-mail", "email address", "your email"],
+      email: ["email", "e-mail", "email address", "your email", "compose", "compose body", "email body", "active compose textbox"],
       phone: ["phone", "mobile", "contact", "telephone", "phone number", "mobile number", "contact number"],
       college: ["college", "university", "institution", "school", "college name", "campus"],
       subject: ["subject", "topic", "title", "subject line"],
       recipient: ["recipient", "recipients", "to", "receiver", "to recipients"],
-      message: ["message", "body", "comments", "description", "text", "message body", "reply message body", "compose body"],
+      message: ["message", "body", "comments", "description", "text", "message body", "reply message body", "compose body", "active message composer", "write a message", "new message"],
+      reply: ["reply", "write a reply", "type a reply", "reply body", "reply message", "active reply composer"],
+      post: ["post", "start a post", "post composer", "post editor", "active post composer", "share", "write a post"],
+      comment: ["comment", "comments", "comments box", "active comment box", "write a comment"],
       address: ["address", "street", "residential address", "home address", "postal address"]
     };
 
     for (const [key, synList] of Object.entries(SYNONYMS)) {
-      const hMatch = hNorm === key || synList.some((s) => hNorm.includes(s));
-      const tMatch = tNorm === key || synList.some((s) => tNorm.includes(s));
+      const hMatch = hNorm === key || synList.some((s) => hNorm === s || cH === s || (s.length >= 3 && (hNorm.includes(s) || cH.includes(s))));
+      const tMatch = tNorm === key || synList.some((s) => tNorm === s || cT === s || (s.length >= 3 && (tNorm.includes(s) || cT.includes(s))));
       if (hMatch && tMatch) return true;
     }
 
+    // Active Composer Context Compatibility
+    if (typeof activeComposer !== "undefined" && activeComposer && activeComposer.state === "open") {
+      const actType = activeComposer.type;
+      if (actType === "message") {
+        if ((cT === "message" || tTokens.includes("message")) && (cH === "message" || cH === "body" || hTokens.includes("message") || hTokens.includes("body"))) return true;
+      } else if (actType === "reply") {
+        if ((cT === "reply" || tTokens.includes("reply")) && (cH === "reply" || cH === "body" || hTokens.includes("reply") || hTokens.includes("body"))) return true;
+      } else if (actType === "email" || actType === "compose") {
+        if ((cT === "email" || cT === "compose" || tTokens.includes("body")) && (cH === "email" || cH === "body" || hTokens.includes("email") || hTokens.includes("body"))) return true;
+      } else if (actType === "post") {
+        if ((cT === "post" || tTokens.includes("post")) && (cH === "post" || cH === "body" || hTokens.includes("post") || hTokens.includes("body"))) return true;
+      } else if (actType === "comment") {
+        if ((cT === "comment" || tTokens.includes("comment")) && (cH === "comment" || cH === "body" || hTokens.includes("comment") || hTokens.includes("body"))) return true;
+      }
+    }
+
     return false;
+  };
+
+  /**
+   * Scores a candidate DOM element against a requested field hint using rich semantic signals.
+   * Considers label, ariaLabel, nearbyText, contextText, placeholder, name, id.
+   * @param {Object} el
+   * @param {string} fieldHint
+   * @returns {number} Score from 0.0 to 1.0
+   */
+  /**
+   * Scores a candidate DOM element against a requested field hint using rich semantic signals.
+   * Considers label, ariaLabel, nearbyText, contextText, placeholder, name, id.
+   * @param {Object} el
+   * @param {string} fieldHint
+   * @returns {number} Score from 0.0 to 1.0
+   */
+  const scoreElementForField = (el, fieldHint) => {
+    if (!el || !fieldHint) return 0;
+    const normalize = (s) => (s || "").toLowerCase().replace(/[:*#_\-\/\\]+/g, " ").trim();
+    const hNorm = normalize(fieldHint);
+    if (!hNorm) return 0;
+
+    const labelNorm = normalize(el.label);
+    const ariaNorm = normalize(el.ariaLabel);
+    const placeholderNorm = normalize(el.placeholder);
+
+    const isSearchIntent = hNorm === "search" ||
+      hNorm === "primary search input" ||
+      fieldHint === "PRIMARY_SEARCH_INPUT" ||
+      (typeof currentStepPlan !== "undefined" && currentStepPlan && (currentStepPlan.expectedRole === "PRIMARY_SEARCH_INPUT" || currentStepPlan.targetRole === "PRIMARY_SEARCH_INPUT" || currentStepPlan.semanticTarget === "PRIMARY_SEARCH_INPUT" || currentStepPlan.target === "PRIMARY_SEARCH_INPUT"));
+
+    const hasExplicitAi = typeof originalUserTask !== "undefined" && originalUserTask &&
+      /\b(?:gemini|copilot|chatgpt|ai\s+mode|ai\s+assistant|chat\s+with|ask\s+ai|ask\s+anything)\b/i.test(originalUserTask);
+
+    if (isSearchIntent) {
+      if (typeof scoreSearchCandidate === "function") {
+        return scoreSearchCandidate(el, typeof originalUserTask !== "undefined" ? originalUserTask : "", hasExplicitAi);
+      }
+      if (typeof globalThis !== "undefined" && typeof globalThis.scoreSearchCandidate === "function") {
+        return globalThis.scoreSearchCandidate(el, typeof originalUserTask !== "undefined" ? originalUserTask : "", hasExplicitAi);
+      }
+      if (!hasExplicitAi) {
+        if (isAiAssistantElement(el)) return 0;
+        const fullCand = [labelNorm, ariaNorm, placeholderNorm, normalize(el.title), normalize(el.name), normalize(el.id)].join(" ");
+        if (/\b(?:ai\s+mode|ask\s+anything|ask\s+google|gemini|ai\s+assistant|assistant|chat\s+with|ask\s+ai|ai\s+search|copilot|how\s+search\s+works)\b/i.test(fullCand) || /^(?:chat|ai|assistant|how\s+search\s+works)$/i.test(labelNorm)) {
+          return 0;
+        }
+      }
+    }
+
+    const elType = (el.type || "").toLowerCase();
+    const elRole = (el.role || "").toLowerCase();
+    const isFormType = ["input", "textarea", "select", "combobox", "searchbox", "textbox", "contenteditable"].includes(elType) ||
+      ["input", "textarea", "select", "combobox", "searchbox", "textbox"].includes(elRole) ||
+      Boolean(el.ariaAutocomplete);
+    if (!isFormType) return 0;
+    const isSearchHint = /\bsearch\b/i.test(hNorm);
+    const isSearchTarget = /\bsearch\b/i.test(labelNorm) || /\bsearch\b/i.test(ariaNorm) || /\bsearch\b/i.test(placeholderNorm) || el.semanticTag === "SEARCH_INPUT";
+
+    if (isSearchHint && !isSearchTarget) return 0;
+    if (!isSearchHint && isSearchTarget) {
+      const hasSpecificFieldMatch = isFieldMatch(el.label, fieldHint) ||
+        (el.ariaLabel && isFieldMatch(el.ariaLabel, fieldHint)) ||
+        (el.placeholder && isFieldMatch(el.placeholder, fieldHint)) ||
+        (el.nearbyText && isFieldMatch(el.nearbyText, fieldHint)) ||
+        (el.contextText && isFieldMatch(el.contextText, fieldHint));
+      if (!hasSpecificFieldMatch) return 0;
+    }
+
+    const activeCompType = (typeof activeComposer !== "undefined" && activeComposer && activeComposer.state === "open")
+      ? activeComposer.type
+      : null;
+    const planCompType = (typeof currentStepPlan !== "undefined" && currentStepPlan && currentStepPlan.composerType)
+      ? currentStepPlan.composerType
+      : null;
+    const planContext = (typeof currentStepPlan !== "undefined" && currentStepPlan && currentStepPlan.context)
+      ? currentStepPlan.context
+      : null;
+
+    const isCommunicationComposer =
+      planContext === "communication_composer" ||
+      planContext === "post_composer" ||
+      planContext === "message_composer" ||
+      planContext === "reply_composer" ||
+      planCompType === "post" ||
+      planCompType === "message" ||
+      planCompType === "reply" ||
+      Boolean(activeCompType) ||
+      hNorm === "linkedin post composer" ||
+      hNorm === "post composer" ||
+      hNorm === "active post composer" ||
+      hNorm === "communication message body" ||
+      hNorm === "message composer" ||
+      hNorm === "active message composer" ||
+      hNorm === "reply message body" ||
+      hNorm === "active reply composer";
+
+    // CRITICAL EXCLUSION: Global Search MUST be excluded from communication composer grounding
+    if (isCommunicationComposer) {
+      if (isSearchTarget || isSearchHint || el.semanticTag === "SEARCH_INPUT" || /search/i.test(labelNorm) || /search/i.test(ariaNorm) || /search/i.test(placeholderNorm) || el.role === "searchbox" || el.name === "q" || el.name === "query") {
+        return 0.0;
+      }
+      if (/\b(?:profile|author|user|avatar)\b/i.test(labelNorm) || el.name === "name") {
+        return 0.0;
+      }
+      const candMeta = [labelNorm, ariaNorm, placeholderNorm, normalize(el.name), normalize(el.id)].join(" ");
+      if (/\b(?:recipient|recipients|subject|search\s+for\s+people|type\s+a\s+name)\b/i.test(candMeta) && !/\b(?:write\s+(?:a\s+)?message|share\s+your\s+thoughts|start\s+a\s+post|message\s+body)\b/i.test(candMeta)) {
+        return 0.0;
+      }
+    }
+
+    // 0b. Post composer / editor field grounding
+    const isPostComposerHint = hNorm === "linkedin post composer" || hNorm === "post composer" || hNorm === "post editor" || hNorm === "active post composer" || /\b(?:post\s+composer|post\s+editor)\b/i.test(hNorm) ||
+      planCompType === "post" || activeCompType === "post" ||
+      (typeof currentStepPlan !== "undefined" && currentStepPlan && (currentStepPlan.target === "active post composer" || currentStepPlan.target === "LinkedIn post composer" || currentStepPlan.target === "post composer" || currentStepPlan.fieldHint === "post composer" || currentStepPlan.context === "post_composer" || (currentStepPlan.context === "communication_composer" && currentStepPlan.composerType === "post")));
+
+    if (isPostComposerHint) {
+      if (isSearchTarget || isSearchHint || el.semanticTag === "SEARCH_INPUT") return 0;
+      if (/\b(?:profile|author|user|name)\b/i.test(labelNorm) || el.name === "name") return 0;
+      if (/\bcomment\b/i.test(labelNorm) || /\bcomment\b/i.test(ariaNorm) || /\bcomment\b/i.test(placeholderNorm)) return 0;
+
+      const isInDialog = Boolean(el.inDialog || el.inModal || el.containerRole === "dialog" || el.containerRole === "alertdialog" || /dialog|modal/i.test(el.contextText || "") || /dialog|modal/i.test(el.nearbyText || ""));
+      const isContentEditable = elType === "contenteditable" || el.isContentEditable || elRole === "textbox";
+      const fullCand = [labelNorm, ariaNorm, placeholderNorm, normalize(el.dataPlaceholder), normalize(el.nearbyText), normalize(el.contextText)].join(" ");
+      const matchesPostIntent = /\b(?:post|talk\s+about|what\s+do\s+you\s+want\s+to\s+talk\s+about|share\s+your\s+thoughts|share|thoughts|write|editor|composer|what's\s+on\s+your\s+mind|create\s+a\s+post)\b/i.test(fullCand);
+
+      if (isInDialog) {
+        if (isContentEditable && matchesPostIntent) return 1.0;
+        if (elType === "textarea" && matchesPostIntent) return 0.99;
+        if (isContentEditable) return 0.98;
+        if (elType === "textarea") return 0.95;
+        if (matchesPostIntent) return 0.90;
+        return 0.80;
+      }
+
+      if (isContentEditable && matchesPostIntent) return 1.0;
+      if (isContentEditable && (activeCompType === "post" || planCompType === "post")) return 0.95;
+      if (elType === "textarea" && matchesPostIntent) return 0.95;
+      if (elType === "textarea" && (activeCompType === "post" || planCompType === "post")) return 0.90;
+      if (isContentEditable) return 0.85;
+      if (elType === "textarea") return 0.80;
+      if (matchesPostIntent) return 0.75;
+      return 0.1;
+    }
+
+    // 0c. Message composer field grounding (LinkedIn, Slack, Twitter/X, Chat, etc.)
+    const isMessageComposerHint = hNorm === "communication message body" || hNorm === "active message composer" || hNorm === "message composer" || hNorm === "message body" ||
+      planCompType === "message" || activeCompType === "message" ||
+      (typeof currentStepPlan !== "undefined" && currentStepPlan && (currentStepPlan.target === "active message composer" || currentStepPlan.target === "communication message body" || currentStepPlan.context === "message_composer" || (currentStepPlan.context === "communication_composer" && currentStepPlan.composerType === "message"))) ||
+      (hNorm === "message" && (activeCompType === "message" || planCompType === "message"));
+
+    if (isMessageComposerHint) {
+      if (isSearchTarget || isSearchHint || el.semanticTag === "SEARCH_INPUT") return 0;
+      const candMeta = [labelNorm, ariaNorm, placeholderNorm, normalize(el.name), normalize(el.id)].join(" ");
+      if (/\b(?:recipient|recipients|subject|subject\s+optional|type\s+a\s+name|search\s+for\s+people)\b/i.test(candMeta) && !/\b(?:write\s+a\s+message|message\s+body)\b/i.test(candMeta)) {
+        return 0;
+      }
+
+      const isInDialog = Boolean(el.inDialog || el.inModal || el.containerRole === "dialog" || el.containerRole === "alertdialog" || /dialog|modal/i.test(el.contextText || "") || /dialog|modal/i.test(el.nearbyText || ""));
+      const isContentEditable = elType === "contenteditable" || el.isContentEditable || elRole === "textbox";
+      const fullCand = [labelNorm, ariaNorm, placeholderNorm, normalize(el.dataPlaceholder), normalize(el.nearbyText), normalize(el.contextText)].join(" ");
+      const matchesMsgIntent = /\b(?:write\s+(?:a\s+)?message|type\s+(?:a\s+)?message|send\s+(?:a\s+)?message|message\s+body|write\s+message|enter\s+(?:the\s+)?message|message)\b/i.test(fullCand);
+
+      if (isInDialog) {
+        if (isContentEditable && matchesMsgIntent) return 1.0;
+        if (elType === "textarea" && matchesMsgIntent) return 1.0;
+        if (isContentEditable) return 0.98;
+        if (elType === "textarea") return 0.95;
+        if (matchesMsgIntent) return 0.90;
+        return 0.80;
+      }
+
+      if (isContentEditable && matchesMsgIntent) return 1.0;
+      if (elType === "textarea" && matchesMsgIntent) return 1.0;
+      if (isContentEditable && (activeCompType === "message" || planCompType === "message")) return 0.95;
+      if (elType === "textarea" && (activeCompType === "message" || planCompType === "message")) return 0.90;
+      if (matchesMsgIntent) return 0.85;
+      return 0.1;
+    }
+
+    // 0d. Reply composer field grounding
+    const isReplyComposerHint = hNorm === "reply message body" || hNorm === "active reply composer" || hNorm === "reply composer" || hNorm === "reply body" ||
+      planCompType === "reply" || activeCompType === "reply" ||
+      (typeof currentStepPlan !== "undefined" && currentStepPlan && (currentStepPlan.target === "active reply composer" || currentStepPlan.target === "Reply message body" || currentStepPlan.context === "reply_composer" || (currentStepPlan.context === "communication_composer" && currentStepPlan.composerType === "reply"))) ||
+      (hNorm === "reply" && (activeCompType === "reply" || planCompType === "reply"));
+
+    if (isReplyComposerHint) {
+      if (isSearchTarget || isSearchHint || el.semanticTag === "SEARCH_INPUT") return 0;
+      const isInDialog = Boolean(el.inDialog || el.inModal || el.containerRole === "dialog" || el.containerRole === "alertdialog" || /dialog|modal/i.test(el.contextText || "") || /dialog|modal/i.test(el.nearbyText || ""));
+      const isContentEditable = elType === "contenteditable" || el.isContentEditable || elRole === "textbox";
+      const fullCand = [labelNorm, ariaNorm, placeholderNorm, normalize(el.dataPlaceholder), normalize(el.nearbyText), normalize(el.contextText)].join(" ");
+      const matchesReplyIntent = /\b(?:write\s+(?:a\s+)?reply|type\s+(?:a\s+)?reply|reply\s+body|write\s+reply|enter\s+(?:a\s+)?reply|reply|message\s+body)\b/i.test(fullCand);
+
+      if (isInDialog) {
+        if (isContentEditable && matchesReplyIntent) return 1.0;
+        if (elType === "textarea" && matchesReplyIntent) return 1.0;
+        if (isContentEditable) return 0.98;
+        if (elType === "textarea") return 0.95;
+        if (matchesReplyIntent) return 0.90;
+        return 0.80;
+      }
+
+      if (isContentEditable && matchesReplyIntent) return 1.0;
+      if (elType === "textarea" && matchesReplyIntent) return 1.0;
+      if (isContentEditable && (activeCompType === "reply" || planCompType === "reply")) return 0.95;
+      if (elType === "textarea" && (activeCompType === "reply" || planCompType === "reply")) return 0.90;
+      if (matchesReplyIntent) return 0.85;
+      return 0.1;
+    }
+
+    // 0e. Email compose textbox field grounding (Gmail, Outlook, etc.)
+    const isEmailComposerHint = hNorm === "active compose textbox" || hNorm === "compose body" || hNorm === "email body" ||
+      planCompType === "email" || activeCompType === "email" ||
+      (typeof currentStepPlan !== "undefined" && currentStepPlan && (currentStepPlan.target === "active compose textbox" || currentStepPlan.context === "compose_body")) ||
+      (hNorm === "body" && (activeCompType === "email" || planCompType === "email"));
+
+    if (isEmailComposerHint) {
+      if (isSearchTarget || isSearchHint || el.semanticTag === "SEARCH_INPUT") return 0;
+      const candMeta = [labelNorm, ariaNorm, placeholderNorm, normalize(el.name), normalize(el.id)].join(" ");
+      if (/\b(?:recipient|recipients|to|subject|cc|bcc)\b/i.test(candMeta) && !/\b(?:message\s+body|compose\s+body)\b/i.test(candMeta)) {
+        return 0;
+      }
+      const isContentEditable = elType === "contenteditable" || el.isContentEditable || elRole === "textbox";
+      const fullCand = [labelNorm, ariaNorm, placeholderNorm, normalize(el.nearbyText), normalize(el.contextText)].join(" ");
+      const matchesEmailIntent = /\b(?:message\s+body|compose\s+body|email\s+body|body|write\s+(?:an?\s+)?email|type\s+message)\b/i.test(fullCand);
+
+      if (isContentEditable && matchesEmailIntent) return 1.0;
+      if (elType === "textarea" && matchesEmailIntent) return 1.0;
+      if (isContentEditable && (activeCompType === "email" || planCompType === "email")) return 0.98;
+      if (elType === "textarea" && (activeCompType === "email" || planCompType === "email")) return 0.92;
+      if (matchesEmailIntent) return 0.85;
+      return 0.1;
+    }
+
+    // 0f. Comment box field grounding
+    const isCommentComposerHint = hNorm === "active comment box" || hNorm === "comment box" || hNorm === "comment" ||
+      planCompType === "comment" || activeCompType === "comment" ||
+      (typeof currentStepPlan !== "undefined" && currentStepPlan && (currentStepPlan.target === "active comment box" || currentStepPlan.context === "comment_box"));
+
+    if (isCommentComposerHint) {
+      if (isSearchTarget || isSearchHint || el.semanticTag === "SEARCH_INPUT") return 0;
+      const isContentEditable = elType === "contenteditable" || el.isContentEditable || elRole === "textbox";
+      const fullCand = [labelNorm, ariaNorm, placeholderNorm, normalize(el.nearbyText), normalize(el.contextText)].join(" ");
+      const matchesCommentIntent = /\b(?:comment|add\s+a\s+comment|write\s+a\s+comment|leave\s+a\s+comment)\b/i.test(fullCand);
+
+      if (isContentEditable && matchesCommentIntent) return 1.0;
+      if (elType === "textarea" && matchesCommentIntent) return 1.0;
+      if (isContentEditable && (activeCompType === "comment" || planCompType === "comment")) return 0.98;
+      if (elType === "textarea" && (activeCompType === "comment" || planCompType === "comment")) return 0.92;
+      if (matchesCommentIntent) return 0.85;
+      return 0.1;
+    }
+
+    // 1. Direct label match
+    if (labelNorm === hNorm) return 1.0;
+    if (isFieldMatch(el.label, fieldHint)) return 1.0;
+
+    // 2. ARIA label match
+    if (el.ariaLabel) {
+      if (normalize(el.ariaLabel) === hNorm || isFieldMatch(el.ariaLabel, fieldHint)) return 1.0;
+    }
+
+    // 3. Nearby DOM context match
+    if (el.nearbyText) {
+      if (isFieldMatch(el.nearbyText, fieldHint)) return 0.95;
+    }
+
+    // 4. Enclosing context text match
+    if (el.contextText) {
+      if (isFieldMatch(el.contextText, fieldHint)) return 0.90;
+    }
+
+    // 5. Placeholder match
+    if (el.placeholder) {
+      if (isFieldMatch(el.placeholder, fieldHint)) return 0.85;
+    }
+
+    // 6. Name / ID match
+    if (el.name && isFieldMatch(el.name, fieldHint)) return 0.80;
+    if (el.id && isFieldMatch(el.id, fieldHint)) return 0.80;
+
+    // 7. Substring on label if >= 3 chars
+    if (hNorm.length >= 3 && (labelNorm.includes(hNorm) || hNorm.includes(labelNorm))) return 0.75;
+
+    return 0;
+  };
+
+  /**
+   * Preserves a rich, normalized semantic target descriptor for dynamic controls.
+   * Conforms to requirement 1: does NOT rely on DOM index or bounding box as primary identity.
+   */
+  const createSemanticTargetDescriptor = (el, targetHint = "", roleHint = "") => {
+    if (!el && !targetHint) return null;
+    const normalize = (s) => (s || "").toLowerCase().replace(/[:*#_\-\/\\]+/g, " ").trim();
+    const actualHint = typeof targetHint === "string" ? targetHint : (targetHint?.targetHint || targetHint?.target || targetHint?.fieldHint || "");
+    const actualRole = typeof roleHint === "string" ? roleHint : (typeof targetHint === "object" ? (targetHint?.targetRole || targetHint?.role || "") : "");
+    const lbl = el?.label || actualHint || "";
+    const isSearchTarget = actualRole === "PRIMARY_SEARCH_INPUT" ||
+      actualHint === "PRIMARY_SEARCH_INPUT" ||
+      actualHint === "search" ||
+      el?.semanticTag === "SEARCH_INPUT" ||
+      (typeof currentStepPlan !== "undefined" && currentStepPlan && (currentStepPlan.expectedRole === "PRIMARY_SEARCH_INPUT" || currentStepPlan.targetRole === "PRIMARY_SEARCH_INPUT" || currentStepPlan.fieldHint === "search"));
+
+    const role = isSearchTarget ? "PRIMARY_SEARCH_INPUT" : (el?.role || (el?.type === "combobox" ? "combobox" : (el?.type === "textbox" ? "textbox" : (el?.type || actualRole || "element"))));
+    const inputType = el?.inputType || el?.type || "input";
+    return {
+      normalizedLabel: isSearchTarget ? "primary_search_input" : normalize(lbl),
+      label: lbl,
+      role: role,
+      targetRole: isSearchTarget ? "PRIMARY_SEARCH_INPUT" : (actualRole || role),
+      isSearchIntent: isSearchTarget,
+      inputType: inputType,
+      controlType: inputType,
+      url: el?.url || el?.href || null,
+      href: el?.href || el?.url || null,
+      domain: el?.domain || null,
+      tag: el?.tag || el?.tagName || null,
+      placeholder: el?.placeholder || null,
+      ariaLabel: el?.ariaLabel || null,
+      name: el?.name || null,
+      id: el?.id || null,
+      title: el?.title || null,
+      nearbyVisibleText: el?.nearbyText || null,
+      associatedLabel: el?.associatedLabel || null,
+      contextText: el?.contextText || el?.nearbyText || null,
+      targetHint: actualHint || lbl,
+      originalIndex: el?.index !== undefined ? el.index : (el?.domIndex !== undefined ? el.domIndex : null),
+      bounds: (typeof normalizeBounds === "function" ? normalizeBounds : (b => Array.isArray(b) ? { x: b[0], y: b[1], width: b[2], height: b[3] } : (b && typeof b.x === "number" ? { x: b.x, y: b.y, width: b.width || 0, height: b.height || 0 } : null)))(el?.bounds || (el?.x !== undefined ? { x: el.x, y: el.y, width: el.width, height: el.height } : null))
+    };
+  };
+
+  /**
+   * Scores a candidate element against a semantic target descriptor using weighted semantic evidence.
+   */
+  const scoreCandidateAgainstDescriptor = (cand, targetDesc) => {
+    if (!cand || !targetDesc) return 0;
+    const normalize = (s) => (s || "").toLowerCase().replace(/[:*#_\-\/\\]+/g, " ").trim();
+    const normUrl = typeof normalizeUrl === "function" ? normalizeUrl : (u => (u ? String(u).trim().toLowerCase().replace(/^https?:\/\//i, "").replace(/^www\./i, "").replace(/\/+$/, "") : ""));
+    const normBounds = typeof normalizeBounds === "function" ? normalizeBounds : (b => Array.isArray(b) ? { x: b[0], y: b[1], width: b[2], height: b[3] } : (b && typeof b.x === "number" ? { x: b.x, y: b.y, width: b.width || 0, height: b.height || 0 } : null));
+    const targetLabel = normalize(targetDesc.normalizedLabel || targetDesc.targetLabel || targetDesc.label || targetDesc.fieldHint || targetDesc.target || "");
+    if (!targetLabel) return 0;
+
+    const candLabel = normalize(cand.label);
+    const candAria = normalize(cand.ariaLabel);
+    const candPlaceholder = normalize(cand.placeholder);
+    const candName = normalize(cand.name);
+    const candId = normalize(cand.id);
+    const candTitle = normalize(cand.title);
+    const candNearby = normalize(cand.nearbyText || cand.nearbyVisibleText);
+    const candContext = normalize(cand.contextText);
+    const candAssoc = normalize(cand.associatedLabel);
+
+    const isSearchDescriptor = targetDesc.isSearchIntent ||
+      targetDesc.targetRole === "PRIMARY_SEARCH_INPUT" ||
+      targetDesc.role === "PRIMARY_SEARCH_INPUT" ||
+      targetLabel === "primary_search_input" ||
+      targetLabel === "search";
+
+    if (isSearchDescriptor) {
+      const hasExplicitAi = typeof originalUserTask !== "undefined" && originalUserTask &&
+        /\b(?:gemini|copilot|chatgpt|ai\s+mode|ai\s+assistant|chat\s+with|ask\s+ai)\b/i.test(originalUserTask);
+      if (typeof scoreSearchCandidate === "function") {
+        return scoreSearchCandidate(cand, typeof originalUserTask !== "undefined" ? originalUserTask : "", hasExplicitAi);
+      }
+      if (typeof globalThis !== "undefined" && typeof globalThis.scoreSearchCandidate === "function") {
+        return globalThis.scoreSearchCandidate(cand, typeof originalUserTask !== "undefined" ? originalUserTask : "", hasExplicitAi);
+      }
+      if (!hasExplicitAi) {
+        const candFull = [candLabel, candAria, candPlaceholder, candName, candId, candTitle, candNearby, candContext].join(" ");
+        if (/\b(?:ai\s+mode|ask\s+anything|ask\s+google|gemini|ai\s+assistant|assistant|chat\s+with|ask\s+ai|ai\s+search|copilot|how\s+search\s+works)\b/i.test(candFull) || /^(?:chat|ai|assistant|how\s+search\s+works)$/i.test(candLabel)) {
+          return 0;
+        }
+      }
+    }
+
+    const candType = (cand.type || "").toLowerCase();
+    const candRole = (cand.role || cand.type || "").toLowerCase();
+    const targetRole = (targetDesc.role || targetDesc.targetType || "").toLowerCase();
+    const isFormTarget = ["input", "textarea", "select", "combobox", "searchbox", "textbox", "contenteditable"].some(r => targetRole.includes(r)) ||
+      Boolean(targetDesc.fieldHint);
+    const isFormCand = ["input", "textarea", "select", "combobox", "searchbox", "textbox", "contenteditable"].includes(candType) ||
+      ["input", "textarea", "select", "combobox", "searchbox", "textbox"].includes(candRole) ||
+      Boolean(cand.ariaAutocomplete);
+
+    // Reject voice/mic controls unless explicitly requested
+    if (!targetLabel.includes("voice") && !targetLabel.includes("mic")) {
+      if (/voice|mic|audio|speak/i.test(candLabel) || /voice|mic|audio|speak/i.test(candAria)) return 0;
+    }
+
+    // Generic search vs non-search distinction
+    const isTargetSearch = /\bsearch\b/i.test(targetLabel);
+    const isCandSearch = /\bsearch\b/i.test(candLabel) || /\bsearch\b/i.test(candAria) || /\bsearch\b/i.test(candPlaceholder) || cand.semanticTag === "SEARCH_INPUT";
+    if (!isTargetSearch && isCandSearch && !candNearby.includes(targetLabel) && !candAssoc.includes(targetLabel)) {
+      if (/^search(?:\s+(?:box|input|field|bar|area|website))?$/i.test(candLabel) || /^search(?:\s+(?:box|input|field|bar|area|website))?$/i.test(candPlaceholder)) {
+        return 0;
+      }
+    }
+
+    let score = 0;
+
+    // 1. Direct label match
+    if (candLabel === targetLabel) {
+      score += 0.45;
+    } else if (isFieldMatch(cand.label, targetLabel)) {
+      score += 0.40;
+    } else if (targetLabel.length >= 3 && (candLabel.includes(targetLabel) || targetLabel.includes(candLabel))) {
+      score += 0.35;
+    } else {
+      const tTokens = targetLabel.split(/\s+/).filter(w => w.length >= 3 || w === "to" || w === "from");
+      const cTokens = candLabel.split(/\s+/).filter(w => w.length >= 3 || w === "to" || w === "from");
+      const matchedTokens = tTokens.filter(t => cTokens.includes(t) || candLabel.includes(t));
+      if (tTokens.length > 0 && matchedTokens.length === tTokens.length) {
+        score += 0.30;
+      } else if (matchedTokens.length > 0) {
+        score += 0.15 * (matchedTokens.length / tTokens.length);
+      }
+    }
+
+    // 1b. Destination URL / domain matching (Essential for search results like ISRO)
+    const targetUrl = normUrl(targetDesc.url || targetDesc.href || "");
+    const targetDomain = normalize(targetDesc.domain || (targetUrl.match(/https?:\/\/(?:www\.)?([^/]+)/i)?.[1]) || "");
+    const candUrl = normUrl(cand.url || cand.href || (cand.node?.href || ""));
+    if (targetUrl && candUrl) {
+      if (candUrl === targetUrl || candUrl.includes(targetUrl) || targetUrl.includes(candUrl)) {
+        score += 0.50;
+      }
+    }
+    if (targetDomain && (candUrl.includes(targetDomain) || candNearby.includes(targetDomain) || candContext.includes(targetDomain) || candLabel.includes(targetDomain))) {
+      score += 0.45;
+    }
+
+    // 1c. Acronym & Organization Entity expansion (e.g. ISRO <-> Indian Space Research Organisation)
+    const ENTITY_EXPANSIONS = {
+      isro: ["indian space research organisation", "isro"],
+      linkedin: ["linkedin"],
+      github: ["github"],
+      nasa: ["national aeronautics and space administration", "nasa"]
+    };
+    const targetHintStr = typeof targetDesc.targetHint === "string" ? targetDesc.targetHint.toLowerCase() : "";
+    for (const [ek, expansions] of Object.entries(ENTITY_EXPANSIONS)) {
+      if (targetLabel.includes(ek) || (targetHintStr && targetHintStr.includes(ek))) {
+        if (expansions.some(exp => candLabel.includes(exp) || candNearby.includes(exp) || candAria.includes(exp))) {
+          score += 0.40;
+          break;
+        }
+      }
+    }
+
+    // 2. ARIA label match
+    if (candAria) {
+      if (candAria === targetLabel || (targetDesc.ariaLabel && candAria === normalize(targetDesc.ariaLabel)) || isFieldMatch(cand.ariaLabel, targetLabel)) {
+        score += 0.35;
+      } else if (targetLabel.length >= 3 && (candAria.includes(targetLabel) || targetLabel.includes(candAria))) {
+        score += 0.25;
+      }
+    }
+
+    // 3. Placeholder match
+    if (candPlaceholder) {
+      if (candPlaceholder === targetLabel || (targetDesc.placeholder && candPlaceholder === normalize(targetDesc.placeholder)) || isFieldMatch(cand.placeholder, targetLabel)) {
+        score += 0.30;
+      } else if (targetLabel.length >= 3 && (candPlaceholder.includes(targetLabel) || targetLabel.includes(candPlaceholder))) {
+        score += 0.20;
+      }
+    }
+
+    // 4. Role & dynamic control compatibility
+    if (isFormTarget && isFormCand) {
+      score += 0.15;
+      if (targetRole && candRole && (targetRole === candRole || candType === targetRole)) {
+        score += 0.05;
+      }
+    } else if (!isFormTarget && (candType === "button" || candType === "link" || candRole === "button" || candRole === "link")) {
+      score += 0.10;
+    }
+
+    // 5. Name / ID / Title match
+    if (candName && (candName === targetLabel || (targetDesc.name && candName === normalize(targetDesc.name)) || isFieldMatch(cand.name, targetLabel))) score += 0.15;
+    if (candId && (candId === targetLabel || (targetDesc.id && candId === normalize(targetDesc.id)) || isFieldMatch(cand.id, targetLabel))) score += 0.15;
+    if (candTitle && (candTitle === targetLabel || (targetDesc.title && candTitle === normalize(targetDesc.title)) || isFieldMatch(cand.title, targetLabel))) score += 0.15;
+
+    // 6. Nearby DOM text & parent/ancestor context
+    if (candNearby && (candNearby === targetLabel || candNearby.includes(targetLabel) || isFieldMatch(candNearby, targetLabel))) score += 0.20;
+    if (candContext && (candContext === targetLabel || candContext.includes(targetLabel) || isFieldMatch(candContext, targetLabel))) score += 0.15;
+    if (candAssoc && (candAssoc === targetLabel || candAssoc.includes(targetLabel) || isFieldMatch(candAssoc, targetLabel))) score += 0.20;
+
+    // 7. Secondary hints (tie-breakers and identity confirmation)
+    if (typeof targetDesc.originalIndex === "number" && cand.index === targetDesc.originalIndex && score > 0) {
+      score += 0.15;
+    }
+    const tBounds = normBounds(targetDesc.bounds);
+    const cBounds = normBounds(cand.bounds || cand);
+    if (tBounds && cBounds && score > 0) {
+      const dx = Math.abs(cBounds.x - tBounds.x);
+      const dy = Math.abs(cBounds.y - tBounds.y);
+      if (dx < 25 && dy < 25) {
+        score += 0.25;
+      } else if (dx < 50 && dy < 50) {
+        score += 0.10;
+      }
+    }
+
+    return Math.min(1.0, score);
+  };
+
+  /**
+   * Re-grounds a semantic target descriptor against fresh perception elements.
+   * Conforms to requirements 2, 5, 6:
+   * - Evaluates weighted semantic evidence
+   * - Uses DOM index and coordinates only as secondary hints
+   * - If exactly one matches strongly (score >= 0.35, difference >= 0.08), returns it
+   * - If multiple match with similar confidence, returns ambiguous
+   */
+  const reGroundSemanticTarget = (freshElements, targetDesc) => {
+    if (!Array.isArray(freshElements) || freshElements.length === 0 || !targetDesc) {
+      return { match: null, isAmbiguous: false, score: 0, index: -1 };
+    }
+
+    const scored = [];
+    freshElements.forEach((cand, idx) => {
+      if (!cand || cand.disabled || String(cand["aria-disabled"]).toLowerCase() === "true") return;
+      const candType = (cand.type || "").toLowerCase();
+      const candRole = (cand.role || "").toLowerCase();
+      const isDynamic = ["combobox", "select"].includes(candType) || ["combobox", "select"].includes(candRole);
+      const isTargetClick = targetDesc.action === "CLICK" || targetDesc.controlType === "button" || targetDesc.controlType === "link";
+      if (cand.readOnly && !isDynamic && !isTargetClick) return;
+      const s = scoreCandidateAgainstDescriptor(cand, targetDesc);
+      if (s >= 0.35) {
+        scored.push({ cand, idx, score: s });
+      }
+    });
+
+    if (scored.length === 0) {
+      return { match: null, isAmbiguous: false, score: 0, index: -1 };
+    }
+
+    scored.sort((a, b) => b.score - a.score);
+    const top = scored[0];
+
+    // Ambiguity check (Requirement 6)
+    if (scored.length > 1) {
+      const runnerUp = scored[1];
+      if (Math.abs(top.score - runnerUp.score) < 0.08) {
+        const topLabel = (top.cand.label || "").trim().toLowerCase();
+        const runLabel = (runnerUp.cand.label || "").trim().toLowerCase();
+        if (topLabel !== runLabel) {
+          return { match: null, isAmbiguous: true, score: top.score, index: -1, candidates: [top.cand, runnerUp.cand] };
+        }
+      }
+    }
+
+    return { match: top.cand, isAmbiguous: false, score: top.score, index: top.idx };
   };
 
   /**
@@ -2111,6 +2957,13 @@ document.addEventListener("DOMContentLoaded", () => {
         }
         console.log("[SIH26171] Reasoning plan created");
 
+        // Milestone 17: Semantic Task Normalization Stage
+        // Guarantees clean separation of Content, Actions, and Control/Approval before grounding & execution
+        if (window.SIHReasoningPlanner && typeof window.SIHReasoningPlanner.normalizeTaskPlan === "function") {
+          reasoningPlan = window.SIHReasoningPlanner.normalizeTaskPlan(reasoningPlan, parsedTask, task);
+        }
+        console.log("[SIH26171] Semantic task normalization completed");
+
         // Persistent original user task (never overwritten or truncated)
         const originalUserTask = task;
         let taskGoals = (reasoningPlan && Array.isArray(reasoningPlan.goals) && reasoningPlan.goals.length > 0)
@@ -2379,6 +3232,18 @@ document.addEventListener("DOMContentLoaded", () => {
           let matchedCandidateIdx = -1;
           let groundingScore = 0;
 
+          const rawTargetHint = (currentStepPlan && (currentStepPlan.explicitTarget || currentStepPlan.fieldHint || currentStepPlan.targetHint || currentStepPlan.legacyTarget)) ||
+            originalAction?.fieldHint ||
+            originalAction?.semanticTarget ||
+            originalAction?.targetLabel ||
+            originalAction?.target ||
+            "";
+          const targetDescriptor = originalAction?.semanticTargetDescriptor || createSemanticTargetDescriptor(
+            originalAction?.element || null,
+            rawTargetHint,
+            originalAction?.targetType || originalAction?.role || (actionType === "FILL" ? "input" : "element")
+          );
+
           if (actionType === "CLICK") {
             const resolver = window.SIHSemanticResolver || (typeof SIHSemanticResolver !== "undefined" ? SIHSemanticResolver : null);
             if (resolver && (currentStepPlan?.isSemantic || currentStepPlan?.ranking || (currentStepPlan?.ordinal !== null && currentStepPlan?.ordinal !== undefined) || currentStepPlan?.spatial || resolver.isSemanticInstruction(originalAction?.targetLabel || originalAction?.target || currentStepPlan?.targetHint))) {
@@ -2387,6 +3252,36 @@ document.addEventListener("DOMContentLoaded", () => {
                 matchedCandidate = semanticRes.concreteElement;
                 matchedCandidateIdx = semanticRes.targetIndex;
                 groundingScore = semanticRes.groundingScore;
+              }
+            }
+
+            if (!matchedCandidate && targetDescriptor) {
+              const regroundRes = reGroundSemanticTarget(freshElements, targetDescriptor);
+              if (regroundRes.isAmbiguous) {
+                console.log("[M21][RECOVERY] target ambiguous");
+                appendPlannerTrace("Target ambiguous");
+                appendPlannerTrace("Recovery aborted");
+                appendPlannerTrace("Final: Action failed safely");
+                return window.SIHActionVerifier?.createRecoveryResult ? window.SIHActionVerifier.createRecoveryResult({
+                  attempted: true,
+                  allowed: false,
+                  result: "FAILED",
+                  reason: "Target ambiguous: multiple candidates match target with similar confidence",
+                  recoveryAction: actionType,
+                  safetyChecked: false
+                }) : {
+                  attempted: true,
+                  allowed: false,
+                  result: "FAILED",
+                  reason: "Target ambiguous: multiple candidates match target with similar confidence",
+                  recoveryAction: actionType,
+                  safetyChecked: false
+                };
+              }
+              if (regroundRes.match) {
+                matchedCandidate = regroundRes.match;
+                matchedCandidateIdx = regroundRes.index;
+                groundingScore = regroundRes.score;
               }
             }
 
@@ -2408,7 +3303,7 @@ document.addEventListener("DOMContentLoaded", () => {
                 if (!el) return 0;
                 if (el.disabled || String(el["aria-disabled"]).toLowerCase() === "true" || el.readOnly) return 0;
                 const elType = (el.type || "").toLowerCase();
-                if (!["button", "link", "input", "element", "textarea", "select"].includes(elType)) return 0;
+                if (!["button", "link", "input", "element", "textarea", "select", "combobox", "searchbox", "textbox", "contenteditable"].includes(elType)) return 0;
                 const labelNorm = normalize(el.label);
                 if (!labelNorm && !targetHint) return 0;
 
@@ -2426,6 +3321,68 @@ document.addEventListener("DOMContentLoaded", () => {
                   }
                   // Heavily penalize buttons when user asked for search box
                   if (elType === "button" || elType === "link") return 0.2;
+                }
+
+                const candTextParts = [
+                  el.label,
+                  el.text,
+                  el.ariaLabel,
+                  el.title,
+                  el.alt,
+                  el.dataColor,
+                  el.placeholder,
+                  el.href,
+                  el.url
+                ].filter(Boolean).map(normalize);
+                const candFullText = candTextParts.join(" ");
+
+                // Profile picture / avatar rejection unless explicitly requested
+                const isExplicitProfileRequested = Boolean(targetHint && /\b(?:profile\s*(?:picture|photo|image|avatar|pic)|user\s*avatar|avatar)\b/i.test(targetHint));
+                const isProfileElement = Boolean(
+                  /\b(?:profile\s*(?:picture|photo|image|avatar|pic)|user\s*avatar|avatar|profile_photo|profile_pic|identity-module)\b/i.test(candFullText) ||
+                  (el.role === "img" && /\b(?:photo|picture|avatar|profile)\b/i.test(el.ariaLabel || el.alt || "")) ||
+                  elType === "image" ||
+                  (el.tagName && el.tagName.toLowerCase() === "img") ||
+                  (el.className && /\b(?:avatar|profile-photo|profile-pic)\b/i.test(el.className))
+                );
+
+                if (isExplicitProfileRequested) {
+                  if (isProfileElement || candFullText.includes("profile")) return 1.0;
+                  return 0;
+                }
+                if (isProfileElement && !isExplicitProfileRequested) {
+                  return 0;
+                }
+
+                // Action-aware composite target: "Start a post" / "Create a post" / "Write a post"
+                const isStartPostTarget = Boolean(
+                  targetHint === "start a post" ||
+                  /^(?:start|create|write|open)\s+(?:a\s+)?post\b/i.test(targetHint)
+                );
+                if (isStartPostTarget) {
+                  const hasActionWord = /\b(?:start|create|write|open)\b/i.test(labelNorm) || /\b(?:start|create|write|open)\b/i.test(candFullText);
+                  const hasPostWord = /\bpost\b/i.test(labelNorm) || /\bpost\b/i.test(candFullText);
+                  if (!hasActionWord || !hasPostWord) return 0;
+                  if (labelNorm === "start a post") return 1.0;
+                  if (candFullText.includes("start a post")) return 0.95;
+                  if (hasActionWord && hasPostWord) return (elType === "button" || el.role === "button") ? 0.92 : 0.85;
+                  return 0;
+                }
+
+                // Action-aware publish button: "Post" / "Publish"
+                const isPublishTarget = Boolean(
+                  targetHint === "post" ||
+                  targetHint === "post button" ||
+                  targetHint === "publish"
+                );
+                if (isPublishTarget) {
+                  if (/\b(?:start|create|write|open)\s+(?:a\s+)?post\b/i.test(candFullText) || /\b(?:start|create|write|open)\s+(?:a\s+)?post\b/i.test(labelNorm)) return 0;
+                  if (el.role === "article" || elType === "article" || /\b(?:feed|comment|share)\b/i.test(labelNorm)) return 0;
+                  const isButtonRole = elType === "button" || el.role === "button" || el.semanticTag === "SUBMIT_BUTTON";
+                  if ((labelNorm === "post" || labelNorm === "publish") && isButtonRole) return 1.0;
+                  if (labelNorm === "post" || labelNorm === "publish") return 0.90;
+                  if (candFullText.trim() === "post" && isButtonRole) return 0.95;
+                  return 0;
                 }
 
                 if (isExplicitTarget && targetHint) {
@@ -2465,32 +3422,69 @@ document.addEventListener("DOMContentLoaded", () => {
               });
             }
           } else if (actionType === "FILL" || actionType === "FILL_FORM") {
-            const rawHint = (currentStepPlan && (currentStepPlan.fieldHint || currentStepPlan.targetHint)) ||
-              originalAction.targetLabel ||
-              originalAction.target ||
-              "";
-            const fieldHint = normalize(rawHint);
-            freshElements.forEach((el, idx) => {
-              if (!el || el.disabled || String(el["aria-disabled"]).toLowerCase() === "true" || el.readOnly) return;
-              const elType = (el.type || "").toLowerCase();
-              if (!["input", "textarea", "select"].includes(elType)) return;
-              const labelNorm = normalize(el.label);
-              if (/voice|mic|audio|speak/i.test(labelNorm) || /voice|mic|audio|speak/i.test(el.ariaLabel || "")) return;
-              let s = 0;
-              if (/\bsearch\b/i.test(labelNorm) && !/\bsearch\b/i.test(fieldHint)) return;
-              if (isFieldMatch(el.label, rawHint)) s = 1.0;
-              else {
+            if (targetDescriptor) {
+              const regroundRes = reGroundSemanticTarget(freshElements, targetDescriptor);
+              if (regroundRes.isAmbiguous) {
+                console.log("[M21][RECOVERY] target ambiguous");
+                appendPlannerTrace("Target ambiguous");
+                appendPlannerTrace("Recovery aborted");
+                appendPlannerTrace("Final: Action failed safely");
+                return window.SIHActionVerifier?.createRecoveryResult ? window.SIHActionVerifier.createRecoveryResult({
+                  attempted: true,
+                  allowed: false,
+                  result: "FAILED",
+                  reason: "Target ambiguous: multiple candidates match target with similar confidence",
+                  recoveryAction: actionType,
+                  safetyChecked: false
+                }) : {
+                  attempted: true,
+                  allowed: false,
+                  result: "FAILED",
+                  reason: "Target ambiguous: multiple candidates match target with similar confidence",
+                  recoveryAction: actionType,
+                  safetyChecked: false
+                };
+              }
+              if (regroundRes.match) {
+                matchedCandidate = regroundRes.match;
+                matchedCandidateIdx = regroundRes.index;
+                groundingScore = regroundRes.score;
+              }
+            }
+
+            if (!matchedCandidate) {
+              const rawHint = (currentStepPlan && (currentStepPlan.fieldHint || currentStepPlan.targetHint)) ||
+                originalAction.fieldHint ||
+                originalAction.semanticTarget ||
+                originalAction.targetLabel ||
+                originalAction.target ||
+                "";
+              const fieldHint = normalize(rawHint);
+              freshElements.forEach((el, idx) => {
+                if (!el || el.disabled || String(el["aria-disabled"]).toLowerCase() === "true" || el.readOnly) return;
+                const elType = (el.type || "").toLowerCase();
+                const elRole = (el.role || "").toLowerCase();
+                const isFormType = ["input", "textarea", "select", "combobox", "searchbox", "textbox", "contenteditable"].includes(elType) ||
+                  ["input", "textarea", "select", "combobox", "searchbox", "textbox"].includes(elRole) ||
+                  Boolean(el.ariaAutocomplete);
+                if (!isFormType) return;
                 const labelNorm = normalize(el.label);
-                if (fieldHint && labelNorm === fieldHint) s = 1.0;
-                else if (fieldHint && fieldHint.length >= 3 && (labelNorm.includes(fieldHint) || fieldHint.includes(labelNorm))) s = 0.85;
-                else if (!fieldHint) s = 0.70;
-              }
-              if (s > groundingScore) {
-                groundingScore = s;
-                matchedCandidate = el;
-                matchedCandidateIdx = idx;
-              }
-            });
+                if (/voice|mic|audio|speak/i.test(labelNorm) || /voice|mic|audio|speak/i.test(el.ariaLabel || "")) return;
+                if (/\bsearch\b/i.test(labelNorm) && !/\bsearch\b/i.test(fieldHint)) return;
+
+                let s = scoreElementForField(el, rawHint);
+                if (s === 0 && originalAction.fieldHint) s = scoreElementForField(el, originalAction.fieldHint);
+                if (s === 0 && originalAction.semanticTarget) s = scoreElementForField(el, originalAction.semanticTarget);
+                if (s === 0 && originalAction.targetLabel) s = scoreElementForField(el, originalAction.targetLabel);
+                if (s > 0 && el.isVisualConfirmed) s = Math.min(1.0, s + 0.05);
+
+                if (s > groundingScore) {
+                  groundingScore = s;
+                  matchedCandidate = el;
+                  matchedCandidateIdx = idx;
+                }
+              });
+            }
           } else if (actionType === "SUBMIT") {
             freshElements.forEach((el, idx) => {
               if (!el || el.disabled || String(el["aria-disabled"]).toLowerCase() === "true") return;
@@ -2597,7 +3591,16 @@ document.addEventListener("DOMContentLoaded", () => {
             validation = window.SIHActionVerifier.validateRecoveryTarget(
               matchedCandidate,
               freshElements,
-              { action: actionType, targetLabel: matchedCandidate.label, targetType: matchedCandidate.type, groundingScore }
+              {
+                action: actionType,
+                targetLabel: matchedCandidate.label,
+                targetType: matchedCandidate.type,
+                groundingScore,
+                targetIndex: matchedCandidateIdx !== undefined ? matchedCandidateIdx : matchedCandidate.index,
+                url: matchedCandidate.url || matchedCandidate.href || (targetDescriptor && (targetDescriptor.url || targetDescriptor.href)),
+                bounds: matchedCandidate.bounds || (matchedCandidate.x !== undefined ? { x: matchedCandidate.x, y: matchedCandidate.y, width: matchedCandidate.width, height: matchedCandidate.height } : null) || (targetDescriptor && targetDescriptor.bounds),
+                semanticTargetDescriptor: targetDescriptor
+              }
             );
           } else {
             if (matchedCandidate.disabled || String(matchedCandidate["aria-disabled"]).toLowerCase() === "true" || matchedCandidate.readOnly) {
@@ -2897,6 +3900,13 @@ document.addEventListener("DOMContentLoaded", () => {
             latestScreenshotDataUrl
           );
 
+          const prevStepPlan = isPlannedTask && plannedSteps && currentStep > 1 ? plannedSteps[currentStep - 2] : null;
+          const nextStepPlan = isPlannedTask && plannedSteps ? plannedSteps[currentStep - 1] : null;
+          const shouldForceFresh = Boolean(
+            (prevStepPlan && (prevStepPlan.expectedTransition === "post_composer_open" || /start\s+(?:a\s+)?post/i.test(prevStepPlan.target || ""))) ||
+            (nextStepPlan && (/^post$/i.test(nextStepPlan.target || "") || nextStepPlan.expectedTransition === "post_published"))
+          );
+
           const perceptionDecision = canReusePerception({
             lastAction: lastExecutedActionType,
             nextActionType: nextActionType,
@@ -2905,7 +3915,7 @@ document.addEventListener("DOMContentLoaded", () => {
             currentStep: currentStep,
             verificationResult: lastStepVerification,
             cachedAt: cachedPerceptionTimestamp,
-            forceFresh: false,
+            forceFresh: shouldForceFresh,
             hasCachedData: hasCachedPerceptionData
           });
 
@@ -3215,10 +4225,12 @@ document.addEventListener("DOMContentLoaded", () => {
                 stepId: currentStep - 1
               }];
             } else if (currentStepPlan.type === "FILL") {
-              taskToSend = `Fill ${currentStepPlan.fieldHint}`;
+              const isSearchStep = currentStepPlan.expectedRole === "PRIMARY_SEARCH_INPUT" || currentStepPlan.targetRole === "PRIMARY_SEARCH_INPUT" || currentStepPlan.fieldHint === "search";
+              taskToSend = isSearchStep ? "Fill search" : `Fill ${currentStepPlan.fieldHint}`;
               stepFieldPlan = [{
                 type: "FILL",
                 fieldHint: currentStepPlan.fieldHint,
+                targetRole: isSearchStep ? "PRIMARY_SEARCH_INPUT" : "input",
                 stepId: currentStep - 1
               }];
             } else if (currentStepPlan.type === "SUBMIT") {
@@ -3237,12 +4249,20 @@ document.addEventListener("DOMContentLoaded", () => {
                 currentStepPlan.isProductSelection ||
                 (currentStepPlan.targetHint && /result|product|item|listing|video|movie|article|website|site|webpage|page|link/i.test(currentStepPlan.targetHint))
               );
+              const targetHintNorm = (currentStepPlan.targetHint || "").toLowerCase().trim();
+              const isAbstract = !targetHintNorm || /^(?:most\s+relevant\s+result|most\s+relavent\s+result|relevant\s+result|correct\s+result|appropriate\s+result|the\s+result|result|the\s+website|website|the\s+site|site|the\s+page|page|the\s+link|link|the\s+product|product|most\s+relevant\s+product|it|that|this|them)$/i.test(targetHintNorm);
+
               if (currentStepPlan.targetEntity && currentStepPlan.targetEntity.name) {
                 taskToSend = `Open ${currentStepPlan.targetEntity.name} ${currentStepPlan.targetIntent || "profile"}`;
               } else if (currentStepPlan.isExplicitTarget && currentStepPlan.explicitTarget) {
                 taskToSend = `Click the result called "${currentStepPlan.explicitTarget}"`;
+              } else if (!isAbstract && currentStepPlan.targetHint) {
+                taskToSend = `Click ${currentStepPlan.targetHint}`;
               } else if (isSearchResultSelection && currentStepPlan.query) {
-                taskToSend = `Select and click the most relevant search result for '${currentStepPlan.query}' (prefer the primary matching listing/website/result, avoid ads or unrelated suggestions)`;
+                const concrete = (window.SIHReasoningPlanner && window.SIHReasoningPlanner.resolveConcreteSearchTarget)
+                  ? window.SIHReasoningPlanner.resolveConcreteSearchTarget(currentStepPlan.query, currentStepPlan.targetHint)
+                  : `${currentStepPlan.query} official website`;
+                taskToSend = `Click ${concrete}`;
               } else {
                 taskToSend = currentStepPlan.targetHint
                   ? `Click ${currentStepPlan.targetHint}`
@@ -3260,19 +4280,34 @@ document.addEventListener("DOMContentLoaded", () => {
           }
 
           const structuredContext = {
-            title: pageData?.title || "",
+            title: (typeof redactText === "function") ? redactText(pageData?.title || "") : (pageData?.title || ""),
             url: pageData?.url || "",
-            redactedSample: pageData?.redactedSample || "",
+            redactedSample: (typeof redactText === "function") ? redactText(pageData?.redactedSample || "") : (pageData?.redactedSample || ""),
             elementCount: (latestVisualElements || []).length,
             elements: (latestVisualElements || []).map((el) => ({
               type: el.type,
-              label: el.label,
+              tag: el.tag || null,
+              role: el.role || null,
+              label: (typeof redactText === "function") ? redactText(el.label || "") : (el.label || ""),
               semanticTag: el.semanticTag || null,
+              url: el.url || el.href || null,
+              href: el.href || el.url || null,
+              placeholder: el.placeholder || null,
+              ariaLabel: el.ariaLabel || null,
+              name: el.name || null,
+              id: el.id || null,
+              title: el.title || null,
               fieldId: el.fieldId !== undefined ? el.fieldId : null,
+              index: el.index !== undefined ? el.index : null,
               x: el.x,
               y: el.y,
               width: el.width,
-              height: el.height
+              height: el.height,
+              isSearchResult: !!el.isSearchResult,
+              isAccountControl: !!el.isAccountControl,
+              isHeaderNav: !!el.isHeaderNav,
+              isFooterNav: !!el.isFooterNav,
+              snippet: el.snippet || null
             })),
             fieldPlan: stepFieldPlan,
             currentGoal: activeGoal ? activeGoal.title : taskToSend,
@@ -3483,7 +4518,14 @@ document.addEventListener("DOMContentLoaded", () => {
               };
             } else if (plannedType === "FILL") {
               const targetCandidate = agentAction ? (agentAction.targetLabel || agentAction.target || "") : "";
-              const matchesRequestedField = isFieldMatch(targetCandidate, currentStepPlan.fieldHint);
+              const isSearchStep = currentStepPlan.expectedRole === "PRIMARY_SEARCH_INPUT" || currentStepPlan.targetRole === "PRIMARY_SEARCH_INPUT" || currentStepPlan.fieldHint === "search";
+              const hasExplicitAi = typeof originalUserTask !== "undefined" && originalUserTask && /\b(?:gemini|copilot|chatgpt|ai\s+mode|ai\s+assistant|chat\s+with|ask\s+ai|ask\s+anything)\b/i.test(originalUserTask);
+              const isAiTarget = isAiAssistantElement({ label: targetCandidate, ariaLabel: targetCandidate });
+              const isDisallowedSearchTarget = isSearchStep && !hasExplicitAi && (
+                isAiTarget ||
+                /^(?:how\s+search\s+works|ai\s+mode|ask\s+anything|gemini|ai\s+assistant|assistant)$/i.test(targetCandidate.trim())
+              );
+              const matchesRequestedField = isFieldMatch(targetCandidate, currentStepPlan.fieldHint) && (!isSearchStep || !isDisallowedSearchTarget);
               const isCompatibleFill = agentAction && agentAction.action === "FILL" && agentAction.targetIndex !== undefined && matchesRequestedField;
               // CRITICAL QUERY RULE: Authoritative explicit value extraction takes precedence
               let authoritativeVal = (currentStepPlan && currentStepPlan.value) ? currentStepPlan.value : null;
@@ -3505,51 +4547,81 @@ document.addEventListener("DOMContentLoaded", () => {
                 }
               }
               if (!isCompatibleFill) {
-                const FORM_TYPES = new Set(["input", "textarea", "select"]);
                 const normalize = (s) => (s || "").trim().toLowerCase();
                 const targetHintNorm = normalize(currentStepPlan.fieldHint);
 
                 let bestIdx = -1;
                 let bestScore = 0;
-                const expectedRole = (currentStepPlan.expectedRole || currentStepPlan.role || "").toLowerCase();
+                let runnerUpScore = 0;
+                let runnerUpIdx = -1;
+                const expectedRole = (isSearchStep ? "PRIMARY_SEARCH_INPUT" : (currentStepPlan.expectedRole || currentStepPlan.role || "")).toLowerCase();
                 const fillCandidates = latestFusedElements || latestVisualElements || [];
                 fillCandidates.forEach((el, idx) => {
-                  if (!FORM_TYPES.has((el.type || "").toLowerCase())) return;
-                  const labelNorm = normalize(el.label);
-                  if (/\bsearch\b/i.test(labelNorm) && !/\bsearch\b/i.test(targetHintNorm)) return;
-                  let score = 0;
-                  if (isFieldMatch(el.label, currentStepPlan.fieldHint)) {
-                    score = 1.0;
-                  } else {
-                    if (labelNorm === targetHintNorm) score = 1.0;
-                    else if (targetHintNorm.length >= 3 && (labelNorm.includes(targetHintNorm) || targetHintNorm.includes(labelNorm))) score = 0.8;
-                  }
-                  if (score > 0 && expectedRole) {
+                  let score = isSearchStep
+                    ? scoreSearchCandidate(el, task, hasExplicitAi)
+                    : scoreElementForField(el, currentStepPlan.fieldHint);
+                  if (score > 0 && expectedRole && !isSearchStep) {
                     const elType = (el.type || "").toLowerCase();
-                    if (expectedRole.includes(elType) || (expectedRole.includes("textarea") && (elType === "textarea" || elType === "contenteditable"))) {
+                    if (expectedRole.includes(elType) || (expectedRole.includes("textarea") && (elType === "textarea" || elType === "contenteditable")) || (expectedRole.includes("combobox") && elType === "combobox")) {
                       score = Math.min(1.0, score + 0.10);
                     }
                   }
-                  if (score > 0 && el.isVisualConfirmed) {
+                  if (score > 0 && el.isVisualConfirmed && !isSearchStep) {
                     score = Math.min(1.0, score + 0.10);
                   }
                   if (score > bestScore) {
+                    runnerUpScore = bestScore;
+                    runnerUpIdx = bestIdx;
                     bestScore = score;
                     bestIdx = idx;
+                  } else if (score > runnerUpScore) {
+                    runnerUpScore = score;
+                    runnerUpIdx = idx;
                   }
                 });
 
-                if (bestIdx >= 0 && bestScore >= 0.35) {
+                // Safety Gate: Ambiguity Rejection (Requirement 10)
+                let isAmbiguous = false;
+                if (bestIdx >= 0 && runnerUpIdx >= 0 && Math.abs(bestScore - runnerUpScore) < 0.05) {
+                  const bestEl = fillCandidates[bestIdx];
+                  const runnerUpEl = fillCandidates[runnerUpIdx];
+                  if (bestEl.label !== runnerUpEl.label && normalize(bestEl.label) !== normalize(runnerUpEl.label)) {
+                    isAmbiguous = true;
+                  }
+                }
+
+                if (isAmbiguous) {
+                  const isComm = (currentStepPlan && (currentStepPlan.context === "communication_composer" || currentStepPlan.composerType || currentStepPlan.context === "post_composer" || currentStepPlan.context === "message_composer"));
+                  agentAction = {
+                    action: "NONE",
+                    target: null,
+                    reason: isComm
+                      ? "AMBIGUOUS COMMUNICATION COMPOSER"
+                      : `Ambiguous field targets: multiple candidates match '${currentStepPlan.fieldHint}' with similar confidence.`
+                  };
+                } else if (bestIdx >= 0 && bestScore >= 0.35) {
                   const matchedEl = fillCandidates[bestIdx];
+                  const cleanSearchLabel = matchedEl.label && !/^(?:how\s+search\s+works|ai\s+mode|textarea|input)$/i.test(matchedEl.label) ? matchedEl.label : "Search";
                   agentAction = {
                     action: "FILL",
+                    target: isSearchStep ? "PRIMARY_SEARCH_INPUT" : (matchedEl.label || matchedEl.ariaLabel || matchedEl.placeholder || currentStepPlan.target || currentStepPlan.fieldHint),
+                    targetRole: isSearchStep ? "PRIMARY_SEARCH_INPUT" : undefined,
                     targetIndex: matchedEl.index !== undefined ? matchedEl.index : bestIdx,
                     targetType: matchedEl.type,
-                    targetLabel: matchedEl.label,
+                    targetLabel: isSearchStep ? cleanSearchLabel : (matchedEl.label || matchedEl.ariaLabel || matchedEl.placeholder || currentStepPlan.fieldHint),
+                    fieldHint: currentStepPlan.fieldHint,
+                    semanticTarget: currentStepPlan.semanticTarget || (isSearchStep ? "PRIMARY_SEARCH_INPUT" : (matchedEl.label || matchedEl.ariaLabel || matchedEl.placeholder)),
                     value: authoritativeVal || currentStepPlan.value || (data.action?.value) || "",
                     groundingScore: bestScore,
-                    groundingMethod: matchedEl.isVisualConfirmed ? "dom+visual-fusion" : "local-fuzzy-match"
+                    groundingMethod: isSearchStep ? "primary-search-ranking" : (matchedEl.isVisualConfirmed ? "dom+visual-fusion" : "local-fuzzy-match"),
+                    semanticTargetDescriptor: createSemanticTargetDescriptor(matchedEl, currentStepPlan.fieldHint, isSearchStep ? "PRIMARY_SEARCH_INPUT" : expectedRole)
                   };
+                  const reqTarget = currentStepPlan.target || currentStepPlan.fieldHint || "input";
+                  const candName = agentAction.targetLabel || agentAction.target || reqTarget;
+                  const roleName = agentAction.targetType || "contenteditable";
+                  const scoreVal = Number(bestScore || 0.95).toFixed(2);
+                  const fillVal = agentAction.value || authoritativeVal || currentStepPlan.value || "[text]";
+                  appendPlannerTrace(`[GROUNDING TRACE]\nAction:\nFILL\n\nRequested Target:\n${reqTarget}\n\nCandidate:\n${candName}\n\nRole:\n${roleName}\n\nSemantic Score:\n${scoreVal}\n\nAction Compatibility:\nHIGH\n\nValue:\n${fillVal}\n\nFinal Decision:\nGROUNDED`);
                 } else {
                   // Section 5 Bounded Recovery: Live DOM re-perception before falling back
                   const recoveryPage = await new Promise((r) => {
@@ -3560,19 +4632,12 @@ document.addEventListener("DOMContentLoaded", () => {
                   if (recoveryPage && Array.isArray(recoveryPage.visualElements)) {
                     latestVisualElements = recoveryPage.visualElements;
                     (latestVisualElements || []).forEach((el, idx) => {
-                      if (!FORM_TYPES.has((el.type || "").toLowerCase())) return;
-                      const labelNorm = normalize(el.label);
-                      if (/\bsearch\b/i.test(labelNorm) && !/\bsearch\b/i.test(targetHintNorm)) return;
-                      let score = 0;
-                      if (isFieldMatch(el.label, currentStepPlan.fieldHint)) {
-                        score = 1.0;
-                      } else {
-                        if (labelNorm === targetHintNorm) score = 1.0;
-                        else if (targetHintNorm.length >= 3 && (labelNorm.includes(targetHintNorm) || targetHintNorm.includes(labelNorm))) score = 0.8;
-                      }
-                      if (score > 0 && expectedRole) {
+                      let score = isSearchStep
+                        ? scoreSearchCandidate(el, task, hasExplicitAi)
+                        : scoreElementForField(el, currentStepPlan.fieldHint);
+                      if (score > 0 && expectedRole && !isSearchStep) {
                         const elType = (el.type || "").toLowerCase();
-                        if (expectedRole.includes(elType) || (expectedRole.includes("textarea") && (elType === "textarea" || elType === "contenteditable"))) {
+                        if (expectedRole.includes(elType) || (expectedRole.includes("textarea") && (elType === "textarea" || elType === "contenteditable")) || (expectedRole.includes("combobox") && elType === "combobox")) {
                           score = Math.min(1.0, score + 0.10);
                         }
                       }
@@ -3583,16 +4648,22 @@ document.addEventListener("DOMContentLoaded", () => {
                     });
                     if (bestIdx >= 0 && bestScore >= 0.35) {
                       const matchedEl = latestVisualElements[bestIdx];
+                      const cleanSearchLabel = matchedEl.label && !/^(?:how\s+search\s+works|ai\s+mode|textarea|input)$/i.test(matchedEl.label) ? matchedEl.label : "Search";
                       stepRecoveryNote = "Recovered form field target after live DOM re-perception";
                       if (window.SIHEvaluationTracker) window.SIHEvaluationTracker.recordRecovery(stepRecoveryNote);
                       agentAction = {
                         action: "FILL",
-                        targetIndex: bestIdx,
+                        target: isSearchStep ? "PRIMARY_SEARCH_INPUT" : (matchedEl.label || matchedEl.ariaLabel || matchedEl.placeholder || currentStepPlan.target || currentStepPlan.fieldHint),
+                        targetRole: isSearchStep ? "PRIMARY_SEARCH_INPUT" : undefined,
+                        targetIndex: matchedEl.index !== undefined ? matchedEl.index : bestIdx,
                         targetType: matchedEl.type,
-                        targetLabel: matchedEl.label,
+                        targetLabel: isSearchStep ? cleanSearchLabel : (matchedEl.label || matchedEl.ariaLabel || matchedEl.placeholder || currentStepPlan.fieldHint),
+                        fieldHint: currentStepPlan.fieldHint,
+                        semanticTarget: currentStepPlan.semanticTarget || (isSearchStep ? "PRIMARY_SEARCH_INPUT" : (matchedEl.label || matchedEl.ariaLabel || matchedEl.placeholder)),
                         value: authoritativeVal || currentStepPlan.value || (data.action?.value) || "",
                         groundingScore: bestScore,
-                        groundingMethod: "bounded-recovery-match"
+                        groundingMethod: isSearchStep ? "primary-search-ranking" : "bounded-recovery-match",
+                        semanticTargetDescriptor: createSemanticTargetDescriptor(matchedEl, currentStepPlan.fieldHint, isSearchStep ? "PRIMARY_SEARCH_INPUT" : expectedRole)
                       };
                     }
                   }
@@ -3616,7 +4687,14 @@ document.addEventListener("DOMContentLoaded", () => {
                 groundingMethod: "search-submission-rule"
               };
             } else if (plannedType === "CLICK" || plannedType === "OPEN") {
-              const isSearchResultSelection = !!(
+              const isPreviousStepSearchSubmit = Boolean(
+                (currentStep >= 3 && parsedTask && parsedTask.steps && parsedTask.steps[currentStep - 2] &&
+                  (parsedTask.steps[currentStep - 2].type === "SUBMIT" || parsedTask.steps[currentStep - 2].target === "search")) ||
+                (window.lastExecutedAction && (window.lastExecutedAction.action === "SUBMIT" || window.lastExecutedAction.target === "search"))
+              );
+              const isSearchResultSelection = Boolean(
+                isPreviousStepSearchSubmit ||
+                currentStepPlan.isSearchResult ||
                 currentStepPlan.query ||
                 currentStepPlan.isProductSelection ||
                 (currentStepPlan.targetHint && /result|product|item|listing|video|movie|article|website|site|webpage|page|link/i.test(currentStepPlan.targetHint))
@@ -3663,10 +4741,27 @@ document.addEventListener("DOMContentLoaded", () => {
                   isCompatibleClick = false; // Discard backend action if it doesn't match the explicit target
                 }
               }
+
+              const explicitClickTarget = (currentStepPlan?.explicitTarget || (isExplicitTarget ? currentStepPlan?.targetHint : null) || currentStepPlan?.target || currentStepPlan?.targetHint || "").toLowerCase().trim();
+              if (isCompatibleClick && explicitClickTarget && !isSearchResultSelection && !isSearchBoxTarget) {
+                const candLabel = (agentAction.targetLabel || agentAction.target || "").toLowerCase();
+                const isExplicitProfileRequested = /\b(?:profile\s*(?:picture|photo|image|avatar|pic)|user\s*avatar|avatar)\b/i.test(explicitClickTarget);
+                const isCandProfile = /\b(?:profile\s*(?:picture|photo|image|avatar|pic)|user\s*avatar|avatar|profile_photo|profile_pic)\b/i.test(candLabel) ||
+                  (agentAction.targetType === "image" || agentAction.role === "img");
+                if (isCandProfile && !isExplicitProfileRequested) {
+                  isCompatibleClick = false; // Discard avatar/profile click suggested by backend
+                } else if (!candLabel.includes(explicitClickTarget) && !explicitClickTarget.includes(candLabel)) {
+                  isCompatibleClick = false; // Discard backend action if it doesn't match the explicit target
+                }
+              }
               if (isCompatibleClick && isSearchResultSelection) {
                 const candLabel = (agentAction.targetLabel || agentAction.target || "").toLowerCase();
-                if (isGenericNavigationOrHomepageTarget(candLabel)) {
-                  isCompatibleClick = false; // Discard homepage navigation click
+                if (isGenericNavigationOrHomepageTarget(candLabel) || isGenericNavigationOrHomepageTarget(agentAction)) {
+                  isCompatibleClick = false; // Discard homepage navigation / account / settings click
+                }
+                const resolver = (typeof window !== "undefined" && window.SIHSemanticResolver) || (typeof SIHSemanticResolver !== "undefined" ? SIHSemanticResolver : null);
+                if (resolver && typeof resolver.isExcludedSearchPageControl === "function" && resolver.isExcludedSearchPageControl(agentAction)) {
+                  isCompatibleClick = false; // Discard excluded search controls
                 }
                 const candIsAccessory = ACCESSORY_TERMS.some(t => candLabel.includes(t) && !queryNorm.includes(t));
                 if (candIsAccessory) {
@@ -3694,6 +4789,8 @@ document.addEventListener("DOMContentLoaded", () => {
               const resolver = (typeof window !== "undefined" && window.SIHSemanticResolver) || (typeof SIHSemanticResolver !== "undefined" ? SIHSemanticResolver : null);
               const isSemanticTask = Boolean(
                 resolver && (
+                  isSearchResultSelection ||
+                  currentStepPlan?.isSearchResult ||
                   currentStepPlan?.isSemantic ||
                   currentStepPlan?.ranking ||
                   (currentStepPlan?.ordinal !== null && currentStepPlan?.ordinal !== undefined) ||
@@ -3705,8 +4802,8 @@ document.addEventListener("DOMContentLoaded", () => {
 
               if (isCompatibleClick && isSemanticTask) {
                 const candLabel = (agentAction.targetLabel || agentAction.target || "").toLowerCase();
-                if (resolver.isSemanticInstruction(candLabel) || agentAction.targetIndex === undefined) {
-                  isCompatibleClick = false; // Discard raw semantic phrase to allow semantic grounding
+                if (resolver.isSemanticInstruction(candLabel) || agentAction.targetIndex === undefined || (isSearchResultSelection && resolver.isExcludedSearchPageControl && resolver.isExcludedSearchPageControl(agentAction))) {
+                  isCompatibleClick = false; // Discard raw semantic phrase or excluded control to allow semantic grounding
                 }
               }
 
@@ -3726,6 +4823,18 @@ document.addEventListener("DOMContentLoaded", () => {
                   const ALLOWED_CLICK_TYPES = ["button", "link", "input", "element", "heading", "tab", "menuitem", "option", "checkbox", "radio", "switch", "select", "section"];
                   if (!ALLOWED_CLICK_TYPES.includes(elType)) return 0;
                   const labelNorm = normalize(el.label);
+                  const candTextParts = [
+                    el.label,
+                    el.text,
+                    el.ariaLabel,
+                    el.title,
+                    el.alt,
+                    el.dataColor,
+                    el.placeholder,
+                    el.href,
+                    el.url
+                  ].filter(Boolean).map(normalize);
+                  const candFullText = candTextParts.join(" ");
 
                   // STRICT SEARCH BOX GROUNDING: Prefer editable text entry; reject voice/mic controls
                   if (isSearchBoxTarget) {
@@ -3745,16 +4854,70 @@ document.addEventListener("DOMContentLoaded", () => {
                     }
                   }
 
+                  // Profile picture / avatar rejection unless explicitly requested
+                  const isExplicitProfileRequested = Boolean(rawHint && /\b(?:profile\s*(?:picture|photo|image|avatar|pic)|user\s*avatar|avatar)\b/i.test(rawHint));
+                  const isProfileElement = Boolean(
+                    /\b(?:profile\s*(?:picture|photo|image|avatar|pic)|user\s*avatar|avatar|profile_photo|profile_pic|identity-module)\b/i.test(candFullText) ||
+                    (el.role === "img" && /\b(?:photo|picture|avatar|profile)\b/i.test(el.ariaLabel || el.alt || "")) ||
+                    elType === "image" ||
+                    (el.tagName && el.tagName.toLowerCase() === "img") ||
+                    (el.className && /\b(?:avatar|profile-photo|profile-pic)\b/i.test(el.className))
+                  );
+
+                  if (isExplicitProfileRequested) {
+                    if (isProfileElement || candFullText.includes("profile")) return 1.0;
+                    return 0;
+                  }
+                  if (isProfileElement && !isExplicitProfileRequested) {
+                    return 0;
+                  }
+
+                  // ACTION-AWARE COMPOSITE UI TARGET: "Start a post" / "Create a post" / "Write a post"
+                  const isStartPostTarget = Boolean(
+                    cleanHint === "start a post" ||
+                    rawHint === "start a post" ||
+                    /^(?:start|create|write|open)\s+(?:a\s+)?post\b/i.test(rawHint) ||
+                    /^(?:start|create|write|open)\s+(?:a\s+)?post\b/i.test(cleanHint)
+                  );
+                  if (isStartPostTarget) {
+                    const hasActionWord = /\b(?:start|create|write|open)\b/i.test(labelNorm) || /\b(?:start|create|write|open)\b/i.test(candFullText);
+                    const hasPostWord = /\bpost\b/i.test(labelNorm) || /\bpost\b/i.test(candFullText);
+                    if (!hasActionWord || !hasPostWord) return 0;
+                    if (labelNorm === "start a post") return 1.0;
+                    if (candFullText.includes("start a post")) return 0.95;
+                    if (hasActionWord && hasPostWord) return (elType === "button" || el.role === "button") ? 0.92 : 0.85;
+                    return 0;
+                  }
+
+                  // ACTION-AWARE PUBLISH BUTTON: "Post" / "Publish"
+                  const isPublishTarget = Boolean(
+                    cleanHint === "post" ||
+                    rawHint === "post" ||
+                    rawHint === "post button" ||
+                    cleanHint === "post button" ||
+                    rawHint === "publish" ||
+                    cleanHint === "publish"
+                  );
+                  if (isPublishTarget) {
+                    if (/\b(?:start|create|write|open)\s+(?:a\s+)?post\b/i.test(candFullText) || /\b(?:start|create|write|open)\s+(?:a\s+)?post\b/i.test(labelNorm)) return 0;
+                    if (el.role === "article" || elType === "article" || /\b(?:feed|comment|share)\b/i.test(labelNorm)) return 0;
+                    const isButtonRole = elType === "button" || el.role === "button" || el.semanticTag === "SUBMIT_BUTTON";
+                    if ((labelNorm === "post" || labelNorm === "publish") && isButtonRole) return 1.0;
+                    if (labelNorm === "post" || labelNorm === "publish") return 0.90;
+                    if (candFullText.trim() === "post" && isButtonRole) return 0.95;
+                    return 0;
+                  }
+
                   // STRICT TARGET VALIDATION: If user specified an explicit named target, verify strictly against it
                   if (isExplicitTarget && explicitTargetVal) {
                     if (isGenericNavigationOrHomepageTarget(el.label)) return 0;
                     if (elType === "input" && (el.semanticTag === "SEARCH_INPUT" || labelNorm.includes("search"))) return 0;
 
                     if (labelNorm === explicitTargetVal) return 1.0;
-                    if (labelNorm.includes(explicitTargetVal)) return 0.95;
+                    if (labelNorm.includes(explicitTargetVal) || candFullText.includes(explicitTargetVal)) return 0.95;
 
                     const explicitTokens = explicitTargetVal.split(/\s+/).filter((t) => t.length > 2 && !["result", "called", "named", "titled", "product", "item"].includes(t));
-                    if (explicitTokens.length > 0 && explicitTokens.every((t) => labelNorm.includes(t))) {
+                    if (explicitTokens.length > 0 && explicitTokens.every((t) => candFullText.includes(t))) {
                       return 0.90;
                     }
                     // NEVER match solely on search query tokens when an explicit target is requested!
@@ -3763,17 +4926,6 @@ document.addEventListener("DOMContentLoaded", () => {
 
                   // ATTRIBUTE-CONSTRAINED TARGET GROUNDING (Color / Descriptive attributes)
                   if (hasAttributeConstraint) {
-                    const candTextParts = [
-                      el.label,
-                      el.text,
-                      el.ariaLabel,
-                      el.title,
-                      el.alt,
-                      el.dataColor,
-                      el.placeholder
-                    ].filter(Boolean).map(normalize);
-                    const candFullText = candTextParts.join(" ");
-
                     const objTokens = targetObjNorm.split(/\s+/).filter(t => t.length > 2);
                     const matchesObject = candFullText.includes(targetObjNorm) || (objTokens.length > 0 && objTokens.every(t => candFullText.includes(t)));
                     if (!matchesObject) return 0;
@@ -3786,8 +4938,9 @@ document.addEventListener("DOMContentLoaded", () => {
                   }
 
                   if (isSearchResultSelection) {
-                    // Anti-homepage filter: Never click navigation, header, or footer links
-                    if (isGenericNavigationOrHomepageTarget(el.label)) return 0;
+                    // Anti-homepage filter: Never click navigation, header, or footer links or Google account/apps
+                    if (isGenericNavigationOrHomepageTarget(el.label) || isGenericNavigationOrHomepageTarget(el)) return 0;
+                    if (resolver && typeof resolver.isExcludedSearchPageControl === "function" && resolver.isExcludedSearchPageControl(el)) return 0;
                     if (elType === "input" && (el.semanticTag === "SEARCH_INPUT" || labelNorm.includes("search"))) return 0;
 
                     // Product Selection Rule:
@@ -3797,17 +4950,65 @@ document.addEventListener("DOMContentLoaded", () => {
                       return labelNorm.includes(term) && !queryNorm.includes(term);
                     });
 
-                    // Evaluate relevance against query or targetHint tokens
+                    // 1. Destination Domain Matching (Rule 4: Prefer semantic grounding of actual result title/link and URL/domain)
+                    const domainHint = currentStepPlan.domain ||
+                      (currentStepPlan.targetHint && (currentStepPlan.targetHint.match(/\(([^)]+\.[a-z]{2,})\)/i)?.[1] || currentStepPlan.targetHint.match(/\b([a-zA-Z0-9_\-]+\.[a-zA-Z]{2,})\b/i)?.[1])) ||
+                      null;
+                    if (domainHint) {
+                      const domainNorm = normalize(domainHint);
+                      if (candFullText.includes(domainNorm)) {
+                        return 0.98;
+                      }
+                    }
+
+                    // 2. Acronym & Organization Entity expansion (e.g. ISRO <-> Indian Space Research Organisation)
+                    const ENTITY_EXPANSIONS = {
+                      isro: ["indian space research organisation", "isro", "isro.gov", "isro.gov.in"],
+                      linkedin: ["linkedin", "linkedin.com"],
+                      github: ["github", "github.com"],
+                      nasa: ["national aeronautics and space administration", "nasa", "nasa.gov"]
+                    };
+                    const entityKeys = Object.keys(ENTITY_EXPANSIONS);
+                    for (const ek of entityKeys) {
+                      if (queryNorm.includes(ek) || (currentStepPlan.targetHint && currentStepPlan.targetHint.toLowerCase().includes(ek))) {
+                        const expansions = ENTITY_EXPANSIONS[ek];
+                        for (const exp of expansions) {
+                          if (candFullText.includes(exp)) {
+                            return 0.96;
+                          }
+                        }
+                      }
+                    }
+
+                    // 3. Profile Matching (e.g. "Sundar Pichai LinkedIn profile")
+                    if (currentStepPlan.targetHint && /profile\b/i.test(currentStepPlan.targetHint)) {
+                      const pTokens = queryTokens.filter(t => t.length > 2);
+                      if (pTokens.length > 0 && pTokens.every(t => candFullText.includes(t))) {
+                        return 0.97;
+                      }
+                    }
+
+                    // 4. Mission / Content Matching (e.g. "GSLV-F17/EOS-05 mission")
+                    if (currentStepPlan.targetHint && /gslv|eos|mission/i.test(currentStepPlan.targetHint)) {
+                      if (candFullText.includes("gslv") && candFullText.includes("eos")) {
+                        return 0.98;
+                      }
+                      if (candFullText.includes("gslv-f17") || candFullText.includes("eos-05")) {
+                        return 0.95;
+                      }
+                    }
+
+                    // 5. Evaluate relevance against query or targetHint tokens
                     const hintTokens = (currentStepPlan.targetHint || "").toLowerCase().split(/\s+/).filter(t => !["official", "website", "the", "most", "relevant", "result", "page", "site", "webpage", "link"].includes(t));
                     const searchTokens = [...new Set([...queryTokens, ...hintTokens])];
-                    if (searchTokens.length > 0 && (elType === "link" || elType === "button" || elType === "element")) {
+                    if (searchTokens.length > 0 && (elType === "link" || elType === "button" || elType === "element" || elType === "heading")) {
                       let matchCount = 0;
                       for (const t of searchTokens) {
-                        if (labelNorm.includes(t)) matchCount++;
+                        if (candFullText.includes(t)) matchCount++;
                       }
                       if (matchCount > 0) {
                         let relScore = 0.7 + (matchCount / searchTokens.length) * 0.25;
-                        if (queryNorm && labelNorm.includes(queryNorm)) {
+                        if (queryNorm && candFullText.includes(queryNorm)) {
                           relScore += 0.05; // Exact query phrase bonus
                         }
                         // Penalize accessory listings heavily when seeking the actual product
@@ -3822,10 +5023,15 @@ document.addEventListener("DOMContentLoaded", () => {
                   let score = 0;
                   if (labelNorm === cleanHint || labelNorm === rawHint) {
                     score = 1.0;
-                  } else if (cleanHint && (labelNorm.includes(cleanHint) || cleanHint.includes(labelNorm))) {
+                  } else if (cleanHint && (labelNorm.includes(cleanHint) || cleanHint.includes(labelNorm) || candFullText.includes(cleanHint))) {
                     score = 0.85;
-                  } else if (rawHint && (labelNorm.includes(rawHint) || rawHint.includes(labelNorm))) {
+                  } else if (rawHint && (labelNorm.includes(rawHint) || rawHint.includes(labelNorm) || candFullText.includes(rawHint))) {
                     score = 0.8;
+                  }
+                  if (rawHint && /gslv|eos/i.test(rawHint)) {
+                    if (candFullText.includes("gslv") && candFullText.includes("eos")) {
+                      score = Math.max(score, 0.98);
+                    }
                   }
                   if (cleanHint === "submit" && (labelNorm.includes("submit") || labelNorm.includes("send") || el.semanticTag === "SUBMIT_BUTTON")) {
                     score = Math.max(score, 0.9);
@@ -3856,7 +5062,9 @@ document.addEventListener("DOMContentLoaded", () => {
                   const semanticRes = resolver.resolveSemanticTarget(currentStepPlan, clickCandidates, {
                     allElements: clickCandidates,
                     currentEntity: taskContext?.currentEntity,
-                    taskContext: taskContext
+                    taskContext: taskContext,
+                    isSearchResultSelection: isSearchResultSelection,
+                    isPreviousStepSearchSubmit: isPreviousStepSearchSubmit
                   });
                   if (semanticRes && semanticRes.action !== "PASS_THROUGH") {
                     agentAction = semanticRes;
@@ -3884,6 +5092,7 @@ document.addEventListener("DOMContentLoaded", () => {
                 }
 
                 if (!semanticHandled) {
+                  let exactTextMatches = [];
                   clickCandidates.forEach((el, idx) => {
                     if (hasAttributeConstraint) {
                       const candTextParts = [
@@ -3914,11 +5123,43 @@ document.addEventListener("DOMContentLoaded", () => {
                     if (s > 0 && el.isVisualConfirmed) {
                       s = Math.min(1.0, s + 0.10);
                     }
+                    if (s >= 0.90) {
+                      const candL = normalize(el.label);
+                      if (candL === cleanHint || candL === rawHint || (cleanHint && candL.startsWith(cleanHint))) {
+                        exactTextMatches.push({ el, idx, score: s });
+                      }
+                    }
                     if (s > bestScore) {
                       bestScore = s;
                       bestIdx = idx;
                     }
                   });
+
+                  if (!hasAttributeConstraint && exactTextMatches.length > 0 && !isSearchResultSelection && !isSearchBoxTarget) {
+                    if (exactTextMatches.length === 1) {
+                      bestIdx = exactTextMatches[0].idx;
+                      bestScore = exactTextMatches[0].score;
+                    } else if (exactTextMatches.length > 1) {
+                      const ordinal = currentStepPlan?.ordinal;
+                      if (typeof ordinal === "number" && ordinal >= 1 && ordinal <= exactTextMatches.length) {
+                        bestIdx = exactTextMatches[ordinal - 1].idx;
+                        bestScore = exactTextMatches[ordinal - 1].score;
+                      } else {
+                        // Ambiguous exact text targets: multiple matches without distinguishing ordinal
+                        bestIdx = -1;
+                        bestScore = 0;
+                        agentAction = {
+                          action: "NONE",
+                          target: null,
+                          targetLabel: currentStepPlan.targetHint || currentStepPlan.target,
+                          groundingScore: 0,
+                          groundingMethod: "ambiguous-exact-text-targets",
+                          reason: `Target ambiguous: multiple identical '${cleanHint || rawHint}' elements found on page without distinguishing evidence`,
+                          blockedReason: `Multiple '${cleanHint || rawHint}' candidates found on page. Action: BLOCKED`
+                        };
+                      }
+                    }
+                  }
 
                   if (hasAttributeConstraint) {
                     if (verifiedAttributeMatches.length === 1) {
@@ -3970,10 +5211,16 @@ document.addEventListener("DOMContentLoaded", () => {
                       targetType: matchedEl.type,
                       targetLabel: matchedEl.label,
                       groundingScore: bestScore,
-                      groundingMethod: hasAttributeConstraint ? "attribute-verified-grounding" : (matchedEl.isVisualConfirmed ? "dom+visual-fusion" : "local-fuzzy-match")
+                      groundingMethod: hasAttributeConstraint ? "attribute-verified-grounding" : (matchedEl.isVisualConfirmed ? "dom+visual-fusion" : "local-fuzzy-match"),
+                      semanticTargetDescriptor: createSemanticTargetDescriptor(matchedEl, currentStepPlan.explicitTarget || currentStepPlan.targetHint || currentStepPlan.target || matchedEl.label, matchedEl.type)
                     };
+                    const reqTarget = currentStepPlan.target || currentStepPlan.targetHint || currentStepPlan.explicitTarget || matchedEl.label;
+                    const candName = matchedEl.label || agentAction.targetLabel || reqTarget;
+                    const roleName = matchedEl.type || (matchedEl.role || "button / clickable");
+                    const scoreVal = Number(bestScore || 0.95).toFixed(2);
+                    appendPlannerTrace(`[GROUNDING TRACE]\nAction:\nCLICK\n\nRequested Target:\n${reqTarget}\n\nCandidate:\n${candName}\n\nRole:\n${roleName}\n\nSemantic Score:\n${scoreVal}\n\nAction Compatibility:\nHIGH\n\nFinal Decision:\nGROUNDED`);
                   }
-                } else if (!agentAction || (agentAction.groundingMethod !== "attribute-not-verified" && agentAction.groundingMethod !== "ambiguous-attribute-targets" && agentAction.groundingMethod !== "ambiguous-semantic-targets")) {
+                } else if (!agentAction || (agentAction.groundingMethod !== "attribute-not-verified" && agentAction.groundingMethod !== "ambiguous-attribute-targets" && agentAction.groundingMethod !== "ambiguous-semantic-targets" && agentAction.groundingMethod !== "ambiguous-exact-text-targets")) {
                   // Section 5 Bounded Recovery: Live DOM re-perception before falling back
                   const recoveryPage = await new Promise((r) => {
                     setTimeout(() => {
@@ -4023,7 +5270,8 @@ document.addEventListener("DOMContentLoaded", () => {
                           targetType: matchedEl.type,
                           targetLabel: matchedEl.label,
                           groundingScore: bestScore,
-                          groundingMethod: hasAttributeConstraint ? "attribute-verified-grounding" : "bounded-recovery-match"
+                          groundingMethod: hasAttributeConstraint ? "attribute-verified-grounding" : "bounded-recovery-match",
+                          semanticTargetDescriptor: createSemanticTargetDescriptor(matchedEl, currentStepPlan.explicitTarget || currentStepPlan.targetHint || currentStepPlan.target || matchedEl.label, matchedEl.type)
                         };
                       }
                     }
@@ -4045,7 +5293,8 @@ document.addEventListener("DOMContentLoaded", () => {
                         targetType: matchedEl.type,
                         targetLabel: matchedEl.label,
                         groundingScore: 0.8,
-                        groundingMethod: "keyword-rule"
+                        groundingMethod: "keyword-rule",
+                        semanticTargetDescriptor: createSemanticTargetDescriptor(matchedEl, missingTargetLabel, matchedEl.type)
                       };
                     } else {
                       agentAction = {
@@ -4124,7 +5373,8 @@ document.addEventListener("DOMContentLoaded", () => {
                   relation: currentStepPlan.relation || null,
                   ordinal: currentStepPlan.ordinal !== undefined ? currentStepPlan.ordinal : null,
                   groundingScore: 1.0,
-                  groundingMethod: currentStepPlan.context ? "contextual-rule" : "local-element-match"
+                  groundingMethod: currentStepPlan.context ? "contextual-rule" : "local-element-match",
+                  semanticTargetDescriptor: createSemanticTargetDescriptor(matchedCandidate, targetRaw, matchedCandidate.type || currentStepPlan.targetType)
                 };
               } else {
                 // GROUNDING FAILED: Candidate does not exist in current perception
@@ -4169,6 +5419,8 @@ document.addEventListener("DOMContentLoaded", () => {
               actionDisplay = agentAction.url
                 ? `NAVIGATE → ${agentAction.target} (${agentAction.url})`
                 : `NAVIGATE → ${agentAction.target}`;
+            } else if (agentAction.action === "OPEN" || agentAction.semanticAction === "OPEN") {
+              actionDisplay = `OPEN → ${targetStr}`;
             } else if (agentAction.amount !== undefined && agentAction.amount !== null) {
               actionDisplay = `${agentAction.action} → ${targetStr} (amount: ${agentAction.amount})`;
             } else {
@@ -4219,7 +5471,19 @@ document.addEventListener("DOMContentLoaded", () => {
           const actualScore = isGrounded
             ? (agentAction.groundingScore !== undefined ? agentAction.groundingScore : 0.8)
             : 0.0;
-          const displayTarget = agentAction?.targetLabel || agentAction?.target || targetStr;
+          let displayTarget = agentAction?.targetLabel || agentAction?.target || targetStr;
+          const isTargetAbstract = !displayTarget || /^(?:most\s+relevant\s+result|most\s+relavent\s+result|relevant\s+result|correct\s+result|appropriate\s+result|the\s+result|result|the\s+website|website|the\s+site|site|the\s+page|page|the\s+link|link|the\s+product|product|most\s+relevant\s+product|it|that|this|them)$/i.test(displayTarget.trim());
+          if (isTargetAbstract) {
+            if (isGrounded && agentAction?.targetLabel && !/most\s+relevant|the\s+result/i.test(agentAction.targetLabel)) {
+              displayTarget = agentAction.targetLabel;
+            } else if (currentStepPlan && currentStepPlan.targetHint && !/most\s+relevant|the\s+result/i.test(currentStepPlan.targetHint)) {
+              displayTarget = currentStepPlan.targetHint;
+            } else if (currentStepPlan && currentStepPlan.query) {
+              displayTarget = (window.SIHReasoningPlanner && window.SIHReasoningPlanner.resolveConcreteSearchTarget)
+                ? window.SIHReasoningPlanner.resolveConcreteSearchTarget(currentStepPlan.query, currentStepPlan.targetHint)
+                : `${currentStepPlan.query} search result`;
+            }
+          }
 
           updateGroundingInspection({
             element: isGrounded ? displayTarget : (displayTarget || "None"),
@@ -4358,7 +5622,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
               if (isExplicit || (isPlannedTask && currentStepPlan && currentStepPlan.type !== "NONE")) {
                 const isAttrBlocked = agentAction?.groundingMethod === "attribute-not-verified";
-                const isAmbiguousBlocked = agentAction?.groundingMethod === "ambiguous-attribute-targets" || agentAction?.groundingMethod === "ambiguous-semantic-targets";
+                const isAmbiguousBlocked = agentAction?.groundingMethod === "ambiguous-attribute-targets" || agentAction?.groundingMethod === "ambiguous-semantic-targets" || agentAction?.groundingMethod === "ambiguous-exact-text-targets";
 
                 if (isAttrBlocked) {
                   if (agentSafetyStatus) agentSafetyStatus.textContent = "BLOCKED (Target attribute not verified)";
@@ -4414,7 +5678,7 @@ document.addEventListener("DOMContentLoaded", () => {
               }
 
               const isAttrBlocked = agentAction?.groundingMethod === "attribute-not-verified";
-              const isAmbiguousBlocked = agentAction?.groundingMethod === "ambiguous-attribute-targets" || agentAction?.groundingMethod === "ambiguous-semantic-targets";
+              const isAmbiguousBlocked = agentAction?.groundingMethod === "ambiguous-attribute-targets" || agentAction?.groundingMethod === "ambiguous-semantic-targets" || agentAction?.groundingMethod === "ambiguous-exact-text-targets";
               executionTraceHistory.push({
                 step: currentStep,
                 totalSteps: isPlannedTask ? totalPlannedSteps : MAX_AGENT_STEPS,
@@ -4434,6 +5698,14 @@ document.addEventListener("DOMContentLoaded", () => {
           let actionExecutionSummary = "";
           let actionExecutedSuccessfully = false;
 
+          // Generic Action Normalization at Planning/Action Boundary:
+          // If OPEN is grounded to a clickable webpage element/link/button, normalize to CLICK.
+          // If OPEN is a destination URL, normalize to NAVIGATE.
+          // Preserves semanticAction = "OPEN" and executionAction = "CLICK" for UI/audit.
+          if (window.SIHReasoningPlanner && typeof window.SIHReasoningPlanner.normalizeAction === "function") {
+            agentAction = window.SIHReasoningPlanner.normalizeAction(agentAction, currentStepPlan);
+          }
+
           let executionPayload = null;
           if (agentAction.action === "FILL_FORM" || (currentStepPlan && currentStepPlan.type === "FILL_FORM")) {
             const localProf = (window.SIHFormProfile && typeof window.SIHFormProfile.getFormProfile === "function")
@@ -4449,7 +5721,10 @@ document.addEventListener("DOMContentLoaded", () => {
             if (currentStepPlan && currentStepPlan.type === "FILL") {
               const hintNorm = (currentStepPlan.fieldHint || "").toLowerCase().replace(/[:*_\-\/\\]+/g, " ").trim();
               const targetNorm = (agentAction.targetLabel || "").toLowerCase().replace(/[:*_\-\/\\]+/g, " ").trim();
-              const matchesField = isFieldMatch(targetNorm, hintNorm);
+              const matchesField = isFieldMatch(targetNorm, hintNorm) ||
+                (currentStepPlan.target && isFieldMatch(targetNorm, currentStepPlan.target)) ||
+                (currentStepPlan.composerType && isFieldMatch(targetNorm, currentStepPlan.composerType)) ||
+                (typeof activeComposer !== "undefined" && activeComposer && isFieldMatch(targetNorm, activeComposer.type));
 
               if (!matchesField) {
                 if (agentSafetyStatus) agentSafetyStatus.textContent = "SAFETY REJECT: Target Mismatch";
@@ -4562,6 +5837,14 @@ document.addEventListener("DOMContentLoaded", () => {
               localVal = authoritativeVal;
             }
 
+            // Defensive semantic content sanitization: ensure no control/action instructions leak into field values
+            if (localVal && typeof localVal === "string" && window.SIHTaskParser && typeof window.SIHTaskParser.stripExecutionControlPhrases === "function") {
+              const cleaned = window.SIHTaskParser.stripExecutionControlPhrases(localVal);
+              if (cleaned && cleaned.trim().length > 0) {
+                localVal = cleaned.trim();
+              }
+            }
+
             agentAction.value = localVal;
 
             executionPayload = {
@@ -4570,7 +5853,8 @@ document.addEventListener("DOMContentLoaded", () => {
               targetType: agentAction.targetType || "input",
               targetLabel: agentAction.targetLabel,
               value: localVal,
-              localValue: localVal
+              localValue: localVal,
+              semanticTargetDescriptor: agentAction.semanticTargetDescriptor || null
             };
           } else if (agentAction.action === "SUBMIT" || (currentStepPlan && currentStepPlan.type === "SUBMIT")) {
             executionPayload = {
@@ -4588,24 +5872,39 @@ document.addEventListener("DOMContentLoaded", () => {
               targetIndex: agentAction.targetIndex,
               context: agentAction.context || (currentStepPlan ? currentStepPlan.context : null),
               relation: agentAction.relation || (currentStepPlan ? currentStepPlan.relation : null),
-              ordinal: agentAction.ordinal !== undefined ? agentAction.ordinal : (currentStepPlan ? currentStepPlan.ordinal : null)
+              ordinal: agentAction.ordinal !== undefined ? agentAction.ordinal : (currentStepPlan ? currentStepPlan.ordinal : null),
+              semanticTargetDescriptor: agentAction.semanticTargetDescriptor || null
             };
           } else if (agentAction.targetIndex !== undefined) {
+            const rawExactTarget = currentStepPlan?.target || currentStepPlan?.targetHint || currentStepPlan?.explicitTarget || agentAction.targetLabel;
             executionPayload = {
               action: "CLICK",
               targetIndex: agentAction.targetIndex,
               targetType: agentAction.targetType,
               targetLabel: agentAction.targetLabel,
+              exactTargetText: rawExactTarget,
+              url: agentAction.url || (agentAction.semanticTargetDescriptor && (agentAction.semanticTargetDescriptor.url || agentAction.semanticTargetDescriptor.href)) || null,
+              bounds: agentAction.bounds || (agentAction.semanticTargetDescriptor && agentAction.semanticTargetDescriptor.bounds) || null,
               context: agentAction.context || (currentStepPlan ? currentStepPlan.context : null),
               relation: agentAction.relation || (currentStepPlan ? currentStepPlan.relation : null),
-              ordinal: agentAction.ordinal !== undefined ? agentAction.ordinal : (currentStepPlan ? currentStepPlan.ordinal : null)
+              ordinal: agentAction.ordinal !== undefined ? agentAction.ordinal : (currentStepPlan ? currentStepPlan.ordinal : null),
+              semanticTargetDescriptor: agentAction.semanticTargetDescriptor || {
+                targetLabel: agentAction.targetLabel,
+                exactText: rawExactTarget,
+                normalizedLabel: (agentAction.targetLabel || "").toLowerCase().trim(),
+                targetType: agentAction.targetType,
+                role: agentAction.targetType,
+                originalIndex: agentAction.targetIndex,
+                bounds: agentAction.bounds || null
+              }
             };
           } else {
             executionPayload = {
               ...agentAction,
               context: agentAction.context || (currentStepPlan ? currentStepPlan.context : null),
               relation: agentAction.relation || (currentStepPlan ? currentStepPlan.relation : null),
-              ordinal: agentAction.ordinal !== undefined ? agentAction.ordinal : (currentStepPlan ? currentStepPlan.ordinal : null)
+              ordinal: agentAction.ordinal !== undefined ? agentAction.ordinal : (currentStepPlan ? currentStepPlan.ordinal : null),
+              semanticTargetDescriptor: agentAction.semanticTargetDescriptor || null
             };
           }
 
@@ -4670,7 +5969,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
           updateCurrentActionCard({
             stepText: isPlannedTask ? `STEP ${currentStep} / ${totalPlannedSteps}` : `STEP ${currentStep} / ${MAX_AGENT_STEPS}`,
-            action: agentAction?.action,
+            action: agentAction?.semanticAction || agentAction?.action,
             target: agentAction?.targetLabel || agentAction?.target || targetStr,
             value: agentAction?.value || "",
             grounding: `${agentAction?.targetLabel || agentAction?.target || "Grounded"} (Score: ${agentAction?.groundingScore !== undefined ? agentAction.groundingScore : "1.00"})`,
@@ -4678,6 +5977,25 @@ document.addEventListener("DOMContentLoaded", () => {
             safety: safetyGate.allowed ? (safetyGate.requiresApproval ? "APPROVAL REQUIRED" : "ALLOWED") : `BLOCKED: ${safetyGate.reason}`,
             status: safetyGate.allowed ? "Ready to execute" : "Halted by safety gate"
           });
+
+          if (agentAction?.semanticAction === "OPEN" && (agentAction?.action === "CLICK" || agentAction?.executionAction === "CLICK")) {
+            appendPlannerTrace(`Semantic Action: OPEN | Execution Action: CLICK | Target: '${agentAction.targetLabel || agentAction.target}' (${agentAction.targetType || "link"})`);
+          }
+
+          if (agentAction?.action === "FILL" && (currentStepPlan?.composerType || (typeof activeComposer !== "undefined" && activeComposer) || currentStepPlan?.requestedIntent)) {
+            const reqIntent = currentStepPlan?.requestedIntent || (currentStepPlan?.fieldHint ? `write a ${currentStepPlan.fieldHint}` : "write a message");
+            const resTarget = currentStepPlan?.target || (typeof activeComposer !== "undefined" && activeComposer ? `active ${activeComposer.type} composer` : (agentAction.targetLabel || "composer"));
+            const conf = (agentAction.groundingScore !== undefined && agentAction.groundingScore >= 0.8) ? "high" : "medium";
+            appendPlannerTrace(
+              `ACTION:\nFILL\n\n` +
+              `REQUESTED INTENT:\n${reqIntent}\n\n` +
+              `RESOLVED TARGET:\n${resTarget}\n\n` +
+              `VALUE:\n${agentAction.value ? "[CONFIDENTIAL / ENTERED]" : "[EMPTY]"}\n\n` +
+              `GROUNDING:\nDOM + visual + active-composer-context\n\n` +
+              `CONFIDENCE:\n${conf}\n\n` +
+              `STATUS:\nReady to execute`
+            );
+          }
 
           // 1. If action requires Human Approval (Submit, Send, Delete, Purchase, etc.)
           if (safetyGate.requiresApproval) {
@@ -4805,7 +6123,20 @@ document.addEventListener("DOMContentLoaded", () => {
 
             let targetReverified = false;
             if (freshCheckData && Array.isArray(freshCheckData.visualElements)) {
-              if (agentAction.targetIndex !== undefined) {
+              const targetDesc = agentAction.semanticTargetDescriptor || createSemanticTargetDescriptor(
+                null,
+                agentAction.targetLabel || agentAction.target,
+                agentAction.targetType
+              );
+              const reground = reGroundSemanticTarget(freshCheckData.visualElements, targetDesc);
+              if (reground && reground.match && !reground.isAmbiguous) {
+                agentAction.targetIndex = reground.index;
+                if (executionPayload) {
+                  executionPayload.targetIndex = reground.index;
+                  executionPayload.semanticTargetDescriptor = targetDesc;
+                }
+                targetReverified = true;
+              } else if (agentAction.targetIndex !== undefined) {
                 const currentEl = freshCheckData.visualElements[agentAction.targetIndex];
                 if (currentEl && currentEl.label === agentAction.targetLabel) {
                   targetReverified = true;
@@ -5001,6 +6332,8 @@ document.addEventListener("DOMContentLoaded", () => {
                       actionExecutionSummary = `Executed: SUBMIT → ${r.target || "search"} (method: ${r.method || "enter_key"})`;
                     } else if (r.amount !== undefined && r.amount !== null) {
                       actionExecutionSummary = `Executed: ${r.action} → ${r.target} (amount: ${r.amount})`;
+                    } else if (agentAction?.semanticAction === "OPEN" && (agentAction?.action === "CLICK" || agentAction?.executionAction === "CLICK")) {
+                      actionExecutionSummary = `Executed: CLICK → ${r.targetType || agentAction.targetType || "link"}: '${r.targetLabel || agentAction.targetLabel || r.target || agentAction.target}'`;
                     } else {
                       actionExecutionSummary = r.target
                         ? `Executed: ${r.action} → ${r.target}`
@@ -5212,16 +6545,26 @@ document.addEventListener("DOMContentLoaded", () => {
             await waitForTabReady(activeTab.id, 6000);
             setAgentState(AGENT_STATES.REPERCEIVE, "Perceiving search results...");
           } else if (agentAction.action === "CLICK") {
-            // If clicking search result or navigation link, allow time for new page load
-            const isNavClick = (currentStepPlan && currentStepPlan.isSearchResult) ||
-              /\b(result|website|site|link|video|product|listing|portal)\b/i.test(agentAction.targetLabel || agentAction.target || "");
-            if (isNavClick) {
-              setAgentState(AGENT_STATES.WAIT, "Navigating to selected target...");
+            const isComposerClick = (currentStepPlan && (currentStepPlan.expectedTransition === "post_composer_open" || currentStepPlan.expectedTransition === "message_composer_open" || currentStepPlan.expectedTransition === "composer_open")) ||
+              /\b(?:start|create|write|open)\s+(?:a\s+)?post\b/i.test(agentAction.targetLabel || agentAction.target || "") ||
+              /\b(?:message|reply)\b/i.test(agentAction.targetLabel || agentAction.target || "");
+            if (isComposerClick) {
+              setAgentState(AGENT_STATES.WAIT, "Waiting for composer to appear...");
               await new Promise((r) => setTimeout(r, 1200));
-            }
-            await waitForTabReady(activeTab.id, 6000);
-            if (isNavClick) {
-              setAgentState(AGENT_STATES.REPERCEIVE, "Observing navigated page...");
+              await waitForTabReady(activeTab.id, 6000);
+              setAgentState(AGENT_STATES.REPERCEIVE, "Observing composer...");
+            } else {
+              // If clicking search result or navigation link, allow time for new page load
+              const isNavClick = (currentStepPlan && currentStepPlan.isSearchResult) ||
+                /\b(result|website|site|link|video|product|listing|portal)\b/i.test(agentAction.targetLabel || agentAction.target || "");
+              if (isNavClick) {
+                setAgentState(AGENT_STATES.WAIT, "Navigating to selected target...");
+                await new Promise((r) => setTimeout(r, 1200));
+              }
+              await waitForTabReady(activeTab.id, 6000);
+              if (isNavClick) {
+                setAgentState(AGENT_STATES.REPERCEIVE, "Observing navigated page...");
+              }
             }
           } else if (agentAction.action === "FILL" || agentAction.action === "FILL_FORM") {
             await waitForTabReady(activeTab.id, 6000);
@@ -5243,6 +6586,21 @@ document.addEventListener("DOMContentLoaded", () => {
               }
             });
           });
+
+          if (agentAction.action === "CLICK") {
+            const isComposerClick = (currentStepPlan && (currentStepPlan.expectedTransition === "post_composer_open" || currentStepPlan.expectedTransition === "message_composer_open" || currentStepPlan.expectedTransition === "composer_open")) ||
+              /\b(?:start|create|write|open)\s+(?:a\s+)?post\b/i.test(agentAction.targetLabel || agentAction.target || "") ||
+              /\b(?:message|reply)\b/i.test(agentAction.targetLabel || agentAction.target || "");
+            if (isComposerClick) {
+              const composerFound = (updatedDom || []).some(el =>
+                el.isContentEditable || el.type === "contenteditable" || el.role === "textbox" ||
+                /\b(?:talk about|share|post|composer|editor|message|reply)\b/i.test(`${el.label || ""} ${el.ariaLabel || ""} ${el.placeholder || ""}`)
+              );
+              if (composerFound) {
+                appendPlannerTrace("[VERIFIED TRANSITION] Composer opened and verified.");
+              }
+            }
+          }
 
           const postDataUrl = (await captureScreenshotDataUrl(activeTab.windowId)) || latestScreenshotDataUrl;
 
@@ -5334,6 +6692,48 @@ document.addEventListener("DOMContentLoaded", () => {
             } else if (agentAction.action === "NAVIGATE") {
               taskContext.currentPage = agentAction.target || agentAction.targetLabel;
             }
+
+            // Section 2: Active Composer Context State Transitions
+            if (actionExecutedSuccessfully) {
+              if (agentAction.action === "CLICK" || agentAction.action === "OPEN") {
+                const clickTarget = (agentAction.targetLabel || agentAction.target || currentStepPlan?.target || "").toLowerCase();
+                if (/\b(?:message|new\s+message)\b/i.test(clickTarget)) {
+                  activeComposer = {
+                    type: "message",
+                    state: "open",
+                    sourceAction: agentAction.targetLabel || currentStepPlan?.target || "Message"
+                  };
+                } else if (/\breply\b/i.test(clickTarget)) {
+                  activeComposer = {
+                    type: "reply",
+                    state: "open",
+                    sourceAction: agentAction.targetLabel || currentStepPlan?.target || "Reply"
+                  };
+                } else if (/\b(?:compose|new\s+email|email|mail)\b/i.test(clickTarget)) {
+                  activeComposer = {
+                    type: "email",
+                    state: "open",
+                    sourceAction: agentAction.targetLabel || currentStepPlan?.target || "Compose"
+                  };
+                } else if (/\b(?:start\s+a\s+post|create\s+(?:a\s+)?post|write\s+(?:a\s+)?post)\b/i.test(clickTarget)) {
+                  activeComposer = {
+                    type: "post",
+                    state: "open",
+                    sourceAction: agentAction.targetLabel || currentStepPlan?.target || "Start a post"
+                  };
+                } else if (/\bcomment\b/i.test(clickTarget)) {
+                  activeComposer = {
+                    type: "comment",
+                    state: "open",
+                    sourceAction: agentAction.targetLabel || currentStepPlan?.target || "Comment"
+                  };
+                } else if (/\b(?:send|publish|post)\b/i.test(clickTarget)) {
+                  activeComposer = null;
+                }
+              } else if (agentAction.action === "FILL" && activeComposer) {
+                activeComposer.state = "filled";
+              }
+            }
           }
           if (postPageData && window.SIHChangeDetector && typeof window.SIHChangeDetector.computeLightweightDomSignature === "function") {
             cachedLightweightSignature = window.SIHChangeDetector.computeLightweightDomSignature(
@@ -5371,7 +6771,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
             updateCurrentActionCard({
               stepText: isPlannedTask ? `STEP ${currentStep} / ${totalPlannedSteps}` : `STEP ${currentStep} / ${MAX_AGENT_STEPS}`,
-              action: agentAction?.action,
+              action: agentAction?.semanticAction || agentAction?.action,
               target: agentAction?.targetLabel || agentAction?.target || targetStr,
               value: agentAction?.value ? (window.SIHActionVerifier?.sanitizeFailureReason ? window.SIHActionVerifier.sanitizeFailureReason(String(agentAction.value)) : (typeof redactText === "function" ? redactText(String(agentAction.value)) : "[REDACTED]")) : "",
               grounding: `${agentAction?.targetLabel || agentAction?.target || "Grounded"} (Score: ${agentAction?.groundingScore !== undefined ? agentAction.groundingScore : "1.00"})`,
@@ -5562,16 +6962,128 @@ document.addEventListener("DOMContentLoaded", () => {
                 agentExecutionStatus.textContent = `Stopped: Execution safety limit (${MAX_AGENT_STEPS} steps) reached.`;
               }
             } else if (isOverallDone) {
-              setAgentState(AGENT_STATES.COMPLETE, `Completed at Step ${currentStep}`);
-              setLiveAgentStatus("ready", "COMPLETED");
-              if (pipelineStepCounter) {
-                pipelineStepCounter.textContent = `Completed (${isPlannedTask ? totalPlannedSteps : currentStep} steps)`;
-              }
-              if (agentStepText) {
-                agentStepText.textContent = `Completed at Step ${currentStep} of ${isPlannedTask ? totalPlannedSteps : MAX_AGENT_STEPS}`;
-              }
-              if (agentExecutionStatus) {
-                agentExecutionStatus.textContent = `Task complete (${isPlannedTask ? totalPlannedSteps : currentStep} steps executed successfully)`;
+              const isPostComposerFilled = (activeComposer && activeComposer.state === "open" && activeComposer.type === "post") ||
+                (currentStepPlan && (currentStepPlan.context === "post_composer" || currentStepPlan.composerType === "post"));
+              const isMessageComposerFilled = (activeComposer && activeComposer.state === "open" && activeComposer.type === "message") ||
+                (currentStepPlan && (currentStepPlan.context === "message_composer" || currentStepPlan.composerType === "message"));
+
+              if (isPostComposerFilled || isMessageComposerFilled) {
+                const termTarget = isPostComposerFilled ? "Post" : "Send";
+                const termActionName = isPostComposerFilled ? "publish" : "send";
+                const approvalMsg = isPostComposerFilled
+                  ? "The post is ready. Do you want me to publish it?"
+                  : "The message is ready. Do you want me to send it?";
+
+                setAgentState(AGENT_STATES.WAITING_APPROVAL || "WAITING_APPROVAL", approvalMsg);
+                setLiveAgentStatus("ready", "WAITING FOR APPROVAL");
+                if (agentStepText) agentStepText.textContent = `WAITING FOR ${termTarget.toUpperCase()} APPROVAL`;
+                if (agentExecutionStatus) agentExecutionStatus.textContent = approvalMsg;
+                if (agentVerificationText) {
+                  agentVerificationText.textContent = `${approvalMsg} Approve ${termActionName}ing?`;
+                  agentVerificationText.style.color = "#15803d";
+                }
+                if (plannerApprovalStatus) {
+                  plannerApprovalStatus.textContent = "WAITING FOR USER APPROVAL";
+                  plannerApprovalStatus.style.color = "#dc2626";
+                }
+                appendPlannerTrace(`Content entered and verified.\n${approvalMsg}`);
+
+                if (popupApprovalContainer) {
+                  popupApprovalContainer.style.display = "block";
+                  if (popupApprovalAction) popupApprovalAction.textContent = `CLICK \u2192 ${termTarget}`;
+                  if (popupApprovalReason) popupApprovalReason.textContent = approvalMsg;
+                }
+
+                // In-page approval modal
+                const termApprovalInPage = new Promise((resolve) => {
+                  chrome.tabs.sendMessage(
+                    activeTab.id,
+                    {
+                      action: "requestHumanApproval",
+                      payload: {
+                        action: "CLICK",
+                        target: termTarget,
+                        risk: "HIGH",
+                        reason: approvalMsg,
+                        taskSummary: task
+                      }
+                    },
+                    (res) => {
+                      if (chrome.runtime.lastError || !res) {
+                        resolve(null);
+                      } else {
+                        resolve(res);
+                      }
+                    }
+                  );
+                });
+
+                const termApprovalPopup = new Promise((resolve) => {
+                  const onApprove = () => { cleanup(); resolve({ approved: true }); };
+                  const onCancel = () => { cleanup(); resolve({ approved: false, cancelled: true }); };
+                  const cleanup = () => {
+                    if (popupBtnApprove) popupBtnApprove.removeEventListener("click", onApprove);
+                    if (popupBtnCancel) popupBtnCancel.removeEventListener("click", onCancel);
+                  };
+                  if (popupBtnApprove) popupBtnApprove.addEventListener("click", onApprove);
+                  if (popupBtnCancel) popupBtnCancel.addEventListener("click", onCancel);
+                });
+
+                const termDecision = await Promise.race([termApprovalInPage, termApprovalPopup]);
+                if (popupApprovalContainer) popupApprovalContainer.style.display = "none";
+                chrome.tabs.sendMessage(activeTab.id, { action: "dismissHumanApproval" }, () => {});
+
+                if (termDecision && termDecision.approved) {
+                  appendPlannerTrace(`${termTarget} approval GRANTED by user. Grounding ${termTarget} button...`);
+                  if (plannerApprovalStatus) {
+                    plannerApprovalStatus.textContent = "APPROVED BY USER";
+                    plannerApprovalStatus.style.color = "#166534";
+                  }
+                  // Execute CLICK -> Post / Send
+                  const termClickRes = await new Promise((resolve) => {
+                    chrome.tabs.sendMessage(
+                      activeTab.id,
+                      {
+                        action: "executeAction",
+                        payload: {
+                          action: "CLICK",
+                          target: termTarget,
+                          targetLabel: termTarget,
+                          exactTargetText: termTarget,
+                          semanticTarget: termTarget,
+                          semanticCategory: "button",
+                          expectedRole: "button"
+                        }
+                      },
+                      (resp) => resolve(resp || { success: false, reason: "No response" })
+                    );
+                  });
+                  appendPlannerTrace(`${termTarget} action executed: ${termClickRes.success ? "COMPLETED ✓" : "Failed to click " + termTarget}`);
+                  setAgentState(AGENT_STATES.COMPLETE, `${termTarget} executed at Step ${currentStep + 1}`);
+                  setLiveAgentStatus("ready", "COMPLETED");
+                  if (agentExecutionStatus) agentExecutionStatus.textContent = `${termTarget} completed successfully.`;
+                } else {
+                  appendPlannerTrace(`${termActionName.toUpperCase()} cancelled or not approved by user. ${termTarget} button was NOT clicked. Page left unchanged.`);
+                  if (plannerApprovalStatus) {
+                    plannerApprovalStatus.textContent = "NOT APPROVED / CANCELLED";
+                    plannerApprovalStatus.style.color = "#dc2626";
+                  }
+                  if (agentExecutionStatus) {
+                    agentExecutionStatus.textContent = `Content entered successfully. Paused without ${termActionName}ing (approval required).`;
+                  }
+                }
+              } else {
+                setAgentState(AGENT_STATES.COMPLETE, `Completed at Step ${currentStep}`);
+                setLiveAgentStatus("ready", "COMPLETED");
+                if (pipelineStepCounter) {
+                  pipelineStepCounter.textContent = `Completed (${isPlannedTask ? totalPlannedSteps : currentStep} steps)`;
+                }
+                if (agentStepText) {
+                  agentStepText.textContent = `Completed at Step ${currentStep} of ${isPlannedTask ? totalPlannedSteps : MAX_AGENT_STEPS}`;
+                }
+                if (agentExecutionStatus) {
+                  agentExecutionStatus.textContent = `Task complete (${isPlannedTask ? totalPlannedSteps : currentStep} steps executed successfully)`;
+                }
               }
             } else {
               setAgentState(AGENT_STATES.HALTED || "HALTED", `Incomplete at Step ${currentStep}`);

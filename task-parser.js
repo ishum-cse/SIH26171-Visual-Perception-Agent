@@ -68,7 +68,7 @@
 
     const lower = t.toLowerCase();
     const isMultiWord = /\s+/.test(t);
-    const hasSemanticTerm = /\b(?:cheapest|expensive|rated|latest|recent|newest|oldest|first|second|third|fourth|fifth|last|black|white|blue|red|green|right|left|top|bottom|below|above|next|beside|product|email|mail|result|item|article|message|button|link|card|row|option|checkbox|page|site|website|downloads?|settings?|section|container|tab)\b/i.test(lower);
+    const hasSemanticTerm = /\b(?:home|homepage|cheapest|expensive|rated|latest|recent|newest|oldest|first|second|third|fourth|fifth|last|black|white|blue|red|green|right|left|top|bottom|below|above|next|beside|product|email|mail|result|item|article|message|button|link|card|row|option|checkbox|page|site|website|downloads?|settings?|section|container|tab|feed|profile|notifications|messages|jobs)\b/i.test(lower);
 
     if (isMultiWord || hasSemanticTerm) {
       if (/^hacker\s+news$/i.test(lower)) return "https://news.ycombinator.com";
@@ -79,6 +79,9 @@
 
     // Generic single-word brand/destination name (e.g. YouTube, Amazon, Wikipedia, GitHub, Google, Gmail)
     const cleanName = lower.replace(/[^a-z0-9\-]/g, "");
+    if (/^(?:home|settings|profile|feed|messages|notifications|jobs|help|about|contact|cart|checkout|compose|reply|message|post|comment)$/i.test(cleanName)) {
+      return null;
+    }
     if (cleanName && cleanName.length >= 2) {
       return `https://www.${cleanName}.com`;
     }
@@ -98,21 +101,32 @@
     f = f.replace(/^(?:the|a|an|my|our|your)\s+/i, "").trim();
     f = f.replace(/\s+(?:and\s+then|and|then|after\s+that|next|followed\s+by|also)$/i, "").trim();
     f = f.replace(/^(?:and\s+then|and|then|after\s+that|next|followed\s+by|also)\s+/i, "").trim();
+    if (/^(?:but|and|then|also|so|or|if|when|while|after|before|until|ask|wait|stop|pause|confirm|approval|require|let|do|don't|not|never|exactly|verbatim|literally)$/i.test(f)) {
+      return "";
+    }
     return f;
   }
 
   /**
    * Cleans fill values by stripping outer quotes and trimming whitespace.
-   * e.g. '"Sankii"' -> "Sankii", "'test'" -> "test"
+   * Supports ASCII ("...") and Unicode (“...”, ‘...’) quotation marks.
+   * Preserves normal apostrophes inside legitimate text.
+   * e.g. '"Sankii"' -> "Sankii", "'test'" -> "test", '“Thank you sir!”' -> "Thank you sir!"
    * @param {string} val
    * @returns {string}
    */
   function cleanValue(val) {
     if (!val || typeof val !== "string") return "";
     let v = val.trim();
-    if ((v.startsWith('"') && v.endsWith('"') && v.length >= 2) ||
-        (v.startsWith("'") && v.endsWith("'") && v.length >= 2)) {
-      v = v.slice(1, -1).trim();
+    if (v.length >= 2) {
+      const first = v[0];
+      const last = v[v.length - 1];
+      if ((first === '"' && last === '"') ||
+          (first === "'" && last === "'") ||
+          ((first === '“' || first === '”') && (last === '”' || last === '“')) ||
+          ((first === '‘' || first === '’') && (last === '’' || last === '‘'))) {
+        v = v.slice(1, -1).trim();
+      }
     }
     return v;
   }
@@ -143,7 +157,22 @@
     if (!task || typeof task !== "string") return null;
     const taskClean = task.trim();
 
-    // 0. Platform search pattern: "search <Platform> for <query>" (e.g. "search Gmail for emails about SIH")
+    // 0. Explicit fill pattern with leading verb: "enter/type/put/write <val> in/into/to/for [the] <field>"
+    // High priority to preserve target/value separation (e.g. "type hello in Search mail" -> value "hello")
+    const mEnterIn = taskClean.match(/^(?:enter|type|put|write)\s+['"]?([^'",;]+?)['"]?\s+(?:in|into|to|for)\s+(?:the\s+)?[a-zA-Z0-9_\-\s]+/i);
+    if (mEnterIn) {
+      const val = cleanValue(mEnterIn[1]);
+      if (val && !/^(?:the|a|an|box|input|field|button)$/i.test(val)) return val;
+    }
+
+    // 0b. Explicit fill pattern: "enter/type/put <val> as [the] <field>" (CRITICAL: <val> is before 'as', <field> is after)
+    const mEnterAs = taskClean.match(/\b(?:enter|type|put)\s+['"]?([^'",;]+?)['"]?\s+as\s+(?:the\s+)?[a-zA-Z0-9_\-\s]+/i);
+    if (mEnterAs) {
+      const val = cleanValue(mEnterAs[1]);
+      if (val && !/^(?:the|a|an|box|input|field|button)$/i.test(val)) return val;
+    }
+
+    // 0c. Platform search pattern: "search <Platform> for <query>" (e.g. "search Gmail for emails about SIH")
     const mPlatformSearch = taskClean.match(/\bsearch\s+([a-zA-Z0-9_\-]+)\s+for\s+['"]?([^'",;]+?)['"]?(?:\s+(?:and\s+then|and|then|after\s+that|next|followed\s+by|also)\b|[.,;!?]|$)/i);
     if (mPlatformSearch && !/^(?:the|a|an|box|input|field|bar|area|button|for)$/i.test(mPlatformSearch[1])) {
       let val = cleanValue(mPlatformSearch[2]);
@@ -157,7 +186,8 @@
 
     // 1. Search query pattern (takes precedence when searching):
     // Strictly bounds the query before verbs like 'and identify', 'and find', 'and open', 'and click', 'and select', 'and visit', etc.
-    const mSearch = taskClean.match(/(?<!\bfill\s)(?<!\benter\s)(?<!\btype\s)(?<!\bclick\s)(?<!\bfind\s)\bsearch\s+(?:for\s+)?(?!(?:the\s+)?(?:box|input|field|bar|area|button)\b)['"]?([^'",;]+?)['"]?(?:\s+(?:and\s+then|and|then|after\s+that|next|followed\s+by|also)\s+(?:identify|find|open|click|select|choose|visit|view|launch|pick|tap|press|see|go\s+to|navigate\s+to)\b|\s+(?:then|after\s+that|next|followed\s+by|and\s+then)\b|(?:\s+[.,;!?]|[.,;!?](?:\s+|$))|$)/i);
+    // Negative lookbehind ensures 'in Search mail' or 'into search' is not treated as a search command
+    const mSearch = taskClean.match(/(?<!\bfill\s)(?<!\benter\s)(?<!\btype\s)(?<!\bclick\s)(?<!\bfind\s)(?<!\bin\s)(?<!\binto\s)(?<!\bto\s)(?<!\bfor\s)\bsearch\s+(?:for\s+)?(?!(?:the\s+)?(?:box|input|field|bar|area|button)\b)['"]?([^'",;]+?)['"]?(?:\s+(?:and\s+then|and|then|after\s+that|next|followed\s+by|also)\s+(?:identify|find|open|click|select|choose|visit|view|launch|pick|tap|press|see|go\s+to|navigate\s+to)\b|\s+(?:then|after\s+that|next|followed\s+by|and\s+then)\b|(?:\s+[.,;!?]|[.,;!?](?:\s+|$))|$)/i);
     if (mSearch) {
       let val = cleanValue(mSearch[1]);
       if (val) {
@@ -166,13 +196,6 @@
       if (val && !/^(?:the|a|an|it|this|that|box|input|field|bar|area|button)$/i.test(val)) {
         return val;
       }
-    }
-
-    // 2. Explicit fill pattern: "enter/type/put <val> as [the] <field>" (CRITICAL: <val> is before 'as', <field> is after)
-    const mEnterAs = taskClean.match(/\b(?:enter|type|put)\s+['"]?([^'",;]+?)['"]?\s+as\s+(?:the\s+)?[a-zA-Z0-9_\-\s]+/i);
-    if (mEnterAs) {
-      const val = cleanValue(mEnterAs[1]);
-      if (val && !/^(?:the|a|an|box|input|field|button)$/i.test(val)) return val;
     }
 
     // 3. Explicit fill pattern: "enter/type/put <val> in/into/for [the] <field>"
@@ -221,6 +244,138 @@
       return null;
     }
 
+    // Pattern 0: 'In [the] <field/container>, enter/type/write/fill/put [exactly]: <val>'
+    const inContainerMatch = text.match(/^In\s+(?:the\s+)?([a-zA-Z0-9_\-\s]+?),\s*(?:enter|type|write|fill|put)(?:\s+exactly)?(?:\s*:\s*|\s+)([\s\S]+)$/i);
+    if (inContainerMatch) {
+      let rawField = inContainerMatch[1].trim();
+      let val = cleanValue(inContainerMatch[2]);
+      let field = cleanFieldHint(rawField);
+      if (/^(?:post\s+editor|post\s+composer|composer|editor)$/i.test(field)) {
+        field = "post composer";
+      }
+      if (val && field) {
+        return {
+          type: "FILL",
+          action: "FILL",
+          fieldHint: field,
+          target: field,
+          semanticTarget: field,
+          targetRole: "contenteditable",
+          expectedRole: "contenteditable",
+          role: "contenteditable",
+          value: val
+        };
+      }
+    }
+
+    // Pattern 0b: Natural language composer intent with intent noun:
+    // e.g. "write a message with thank you sir", "type a reply with thanks", "write an email saying hello", "write a post saying ..."
+    const composerIntentMatch = text.match(/^(?:write|type|enter|send|draft)\s+(?:a\s+|an\s+)?(?:new\s+)?(message|email|mail|post|comment|reply|note)\s+(?:with|saying|text|as|:|that\s+says)\s+['"]?([\s\S]+?)['"]?$/i);
+    if (composerIntentMatch) {
+      const intentNoun = composerIntentMatch[1].toLowerCase();
+      const val = cleanValue(composerIntentMatch[2]);
+      if (val) {
+        if (intentNoun === "message" || intentNoun === "note") {
+          return {
+            type: "FILL",
+            action: "FILL",
+            fieldHint: "message",
+            target: "active message composer",
+            semanticTarget: "active message composer",
+            targetRole: "contenteditable",
+            expectedRole: "contenteditable",
+            role: "contenteditable",
+            context: "communication_composer",
+            composerType: "message",
+            requestedIntent: `write a ${intentNoun}`,
+            value: val
+          };
+        } else if (intentNoun === "reply") {
+          return {
+            type: "FILL",
+            action: "FILL",
+            fieldHint: "reply",
+            target: "active reply composer",
+            semanticTarget: "active reply composer",
+            targetRole: "contenteditable",
+            expectedRole: "contenteditable",
+            role: "contenteditable",
+            context: "communication_composer",
+            composerType: "reply",
+            requestedIntent: "write a reply",
+            value: val
+          };
+        } else if (intentNoun === "email" || intentNoun === "mail") {
+          return {
+            type: "FILL",
+            action: "FILL",
+            fieldHint: "body",
+            target: "active compose textbox",
+            semanticTarget: "active compose textbox",
+            targetRole: "contenteditable",
+            expectedRole: "contenteditable",
+            role: "contenteditable",
+            context: "communication_composer",
+            composerType: "email",
+            requestedIntent: `write an ${intentNoun}`,
+            value: val
+          };
+        } else if (intentNoun === "post") {
+          return {
+            type: "FILL",
+            action: "FILL",
+            fieldHint: "post composer",
+            target: "active post composer",
+            semanticTarget: "active post composer",
+            targetRole: "contenteditable",
+            expectedRole: "contenteditable",
+            role: "contenteditable",
+            context: "communication_composer",
+            composerType: "post",
+            requestedIntent: "write a post",
+            value: val
+          };
+        } else if (intentNoun === "comment") {
+          return {
+            type: "FILL",
+            action: "FILL",
+            fieldHint: "comment",
+            target: "active comment box",
+            semanticTarget: "active comment box",
+            targetRole: "contenteditable",
+            expectedRole: "contenteditable",
+            role: "contenteditable",
+            context: "communication_composer",
+            composerType: "comment",
+            requestedIntent: "write a comment",
+            value: val
+          };
+        }
+      }
+    }
+
+    // Pattern 0c: Natural language container colon fill:
+    // e.g. "write this in the comments box: Great post", "write in the message box: Hello"
+    const inBoxColonMatch = text.match(/^(?:write|type|enter|put)\s+(?:this\s+)?in(?:to)?\s+(?:the\s+)?([a-zA-Z0-9_\-\s]+?)\s*:\s*['"]?([\s\S]+?)['"]?$/i);
+    if (inBoxColonMatch) {
+      const rawField = inBoxColonMatch[1].trim();
+      const val = cleanValue(inBoxColonMatch[2]);
+      const field = cleanFieldHint(rawField);
+      if (field && val) {
+        return {
+          type: "FILL",
+          action: "FILL",
+          fieldHint: field,
+          target: field,
+          semanticTarget: field,
+          targetRole: "contenteditable",
+          expectedRole: "contenteditable",
+          role: "contenteditable",
+          value: val
+        };
+      }
+    }
+
     // Pattern 1a: 'enter/type/put/write <val> as [the] <field>' or 'enter <field> as <val>'
     const enterAsMatch = text.match(/^(?:enter|type|put|write)\s+(.+?)\s+as\s+(?:the\s+)?([a-zA-Z0-9_\-\s]+?)(?:\s+field|\s+input|\s+box|\s+area|\s+textbox)?$/i);
     if (enterAsMatch) {
@@ -232,43 +387,70 @@
         val = cleanValue(enterAsMatch[2]);
       }
       if (val && field && !isPronounOrReference(field) && !/^(?:the|a|an|to)$/i.test(val)) {
-        return { type: "FILL", fieldHint: field, value: val };
+        return { type: "FILL", action: "FILL", fieldHint: field, target: field, value: val };
       }
     }
 
     // Pattern 1b: '[enter/type/put/write] <val> in/into/for/to <field>' (only if not starting with set/fill where field precedes val)
     if (!/^(?:set|fill)\b/i.test(text)) {
-      const enterInMatch = text.match(/^(?:(?:enter|type|put|write)\s+)?(.+?)\s+(?:in|into|for|to)\s+(?:the\s+)?([a-zA-Z0-9_\-\s]+?)(?:\s+field|\s+input|\s+box|\s+area|\s+textbox)?$/i);
+      const enterInMatch = text.match(/^(?:(?:enter|type|put|write)\s+)?(.+?)\s+(in|into|for|to)\s+(?:the\s+)?([a-zA-Z0-9_\-\s]+?)(?:\s+field|\s+input|\s+box|\s+area|\s+textbox)?$/i);
       if (enterInMatch) {
-        const val = cleanValue(enterInMatch[1]);
-        const field = cleanFieldHint(enterInMatch[2]);
-        if (val && field && !isPronounOrReference(field) && !/^(?:the|a|an|to|it|that|this)$/i.test(val)) {
-          return { type: "FILL", fieldHint: field, value: val };
+        const prep = enterInMatch[2].toLowerCase();
+        const rawTarget = enterInMatch[3].trim();
+        const hasExplicitControlWord = /(?:\s+field|\s+input|\s+box|\s+area|\s+textbox|\s+bar|\s+composer|\s+editor)$/i.test(enterInMatch[0]);
+        const isKnownField = /^(?:search|email|phone|mobile|password|username|name|full\s+name|subject|recipient|address|message|comment|notes?)$/i.test(cleanFieldHint(rawTarget));
+
+        // Prepositions 'in' and 'into' are unequivocal locative containers (e.g. "in Search mail", "in From", "into password").
+        // Only prepositions 'for' and 'to' need strict control word / known field guards to prevent
+        // conversational phrases ("Thanks for your email", "Hello, I wanted to contact you") from splitting into targets.
+        const isLocativeIn = prep === "in" || prep === "into";
+        const isValidFieldTarget = isLocativeIn || hasExplicitControlWord || (isKnownField && !/^(?:your|my|our)\s+/i.test(rawTarget));
+
+        if (isValidFieldTarget) {
+          const val = cleanValue(enterInMatch[1]);
+          const field = cleanFieldHint(rawTarget);
+          if (val && field && !isPronounOrReference(field) && !/^(?:the|a|an|to|it|that|this)$/i.test(val)) {
+            return { type: "FILL", action: "FILL", fieldHint: field, target: field, value: val };
+          }
         }
       }
     }
 
     // Pattern 2a: With explicit fill verb: '[fill/set/enter] [in/into] [the] <field> with/to/as/is/:/= <val>'
-    const explicitFillMatch = text.match(/^(?:fill|set|enter)\s+(?:in\s+|into\s+)?(?:the\s+)?([a-zA-Z0-9_\-\s]+?)(?:\s+(?:with|to|as|is|:=|=)\s+|\s*:\s*)(.+)$/i);
+    const explicitFillMatch = text.match(/^(?:fill|set|enter)\s+(?:in\s+|into\s+)?(?:the\s+)?([a-zA-Z0-9_\-\s]+?)(?:\s+(?:with|to|as|is)\s+|\s*(?::=|=|:)\s*)(.+)$/i);
     if (explicitFillMatch) {
       const rawField = explicitFillMatch[1].trim();
-      // Guard: Do not parse form wrappers ("this form", "the form", "details") as a single text field
-      if (!/^(?:(?:this|the|a|all)\s+)?(?:form|details|fields|profile|information|data)$/i.test(rawField)) {
+      // Guard: Do not parse form wrappers ("this form", "the form", "details") or adverbs ("exactly") as a single text field
+      if (!/^(?:(?:this|the|a|all)\s+)?(?:form|details|fields|profile|information|data)$/i.test(rawField) && !/^(?:exactly|verbatim|literally)$/i.test(rawField)) {
         const field = cleanFieldHint(rawField);
         const val = cleanValue(explicitFillMatch[2]);
         if (field && val && !isPronounOrReference(field)) {
-          return { type: "FILL", fieldHint: field, value: val };
+          return { type: "FILL", action: "FILL", fieldHint: field, target: field, value: val };
         }
       }
     }
 
     // Pattern 2b: Without leading verb: '[the] <field> with/as/is/:/= <val>' (disallows 'to' without fill verb to prevent phrase collisions)
-    const implicitFillMatch = text.match(/^(?:the\s+)?([a-zA-Z0-9_\-\s]+?)(?:\s+(?:with|as|is|:=|=)\s+|\s*:\s*)(.+)$/i);
+    const implicitFillMatch = text.match(/^(?:the\s+)?([a-zA-Z0-9_\-\s]+?)(?:\s+(?:with|as|is)\s+|\s*(?::=|=|:)\s*)(.+)$/i);
     if (implicitFillMatch) {
-      const field = cleanFieldHint(implicitFillMatch[1]);
-      const val = cleanValue(implicitFillMatch[2]);
-      if (field && val && !isPronounOrReference(field) && !/^(?:search|click|press|tap|open|find|go|select|choose|check|uncheck|toggle|reply|compose|send)$/i.test(field) && !/^(?:reply|compose|send|open|go|navigate|click|press)\b/i.test(field)) {
-        return { type: "FILL", fieldHint: field, value: val };
+      const rawTarget = implicitFillMatch[1].trim();
+      // Guard: Do not treat composer intents ("write a message", "type a reply", "write a post") or verbs ("write", "type") as literal field targets
+      if (!/^(?:write|type|enter|send|draft)\s+(?:a\s+|an\s+)?(?:message|email|mail|post|comment|reply|note)$/i.test(rawTarget) &&
+          !/^(?:write|type|enter|put|set|fill)$/i.test(rawTarget)) {
+        const field = cleanFieldHint(rawTarget);
+        const val = cleanValue(implicitFillMatch[2]);
+        if (field && val && !isPronounOrReference(field) && !/^(?:search|click|press|tap|open|find|go|select|choose|check|uncheck|toggle|reply|compose|send)$/i.test(field) && !/^(?:reply|compose|send|open|go|navigate|click|press|write|type)\b/i.test(field)) {
+          return { type: "FILL", action: "FILL", fieldHint: field, target: field, value: val };
+        }
+      }
+    }
+
+    // Pattern 2c: 'write/type/enter [:] [saying/with] <val>'
+    const writeColonMatch = text.match(/^(?:write|type|enter|put)\s*(?::\s*|\s+(?:saying|with|that\s+says)\s+)['"]?([\s\S]+?)['"]?$/i);
+    if (writeColonMatch) {
+      const val = cleanValue(writeColonMatch[1]);
+      if (val && !/^(?:the|a|an|it|this|that)$/i.test(val)) {
+        return { type: "FILL", action: "FILL", fieldHint: "body", target: "body", value: val };
       }
     }
 
@@ -277,7 +459,7 @@
     if (typeValMatch) {
       const val = cleanValue(typeValMatch[1]);
       if (val && !/^(?:the|a|an|it|this|that)$/i.test(val)) {
-        return { type: "FILL", fieldHint: "body", value: val };
+        return { type: "FILL", action: "FILL", fieldHint: "body", target: "body", value: val };
       }
     }
 
@@ -296,7 +478,7 @@
     return /^(?:it|this|that|them|that\s+button|this\s+button|the\s+button|button|that\s+link|this\s+link|the\s+link|link|the\s+above|above|the\s+field|that\s+field|this\s+field|field)$/i.test(s);
   }
 
-  const CONTEXTUAL_REFERENCE_PATTERN = /^(?:(?:his|her|their|its|this|that|the)\s+)?(?:profile|product(?:\s+page)?|page|item|email|message|post|result|first\s+result|person)$|^(?:his|her|their|its|this|that|it|them|this\s+person|that\s+person|the\s+person|the\s+result|the\s+first\s+result|the\s+selected\s+result|that\s+profile|their\s+profile|his\s+profile|her\s+profile|that\s+item|this\s+product|that\s+product|the\s+email|that\s+email|the\s+message|this\s+post)$/i;
+  const CONTEXTUAL_REFERENCE_PATTERN = /^(?:(?:his|her|their|its|this|that|the)\s+)(?:profile|product(?:\s+page)?|page|item|email|message|post|result|first\s+result|person)$|^(?:his|her|their|its|this|that|it|them|this\s+person|that\s+person|the\s+person|the\s+result|the\s+first\s+result|the\s+selected\s+result|that\s+profile|their\s+profile|his\s+profile|her\s+profile|that\s+item|this\s+product|that\s+product|the\s+email|that\s+email|the\s+message|this\s+post|that\s+post)$/i;
 
   function isContextualReference(str) {
     if (!str || typeof str !== "string") return false;
@@ -480,7 +662,45 @@
    */
   function splitActionClauses(text) {
     if (!text || typeof text !== 'string') return [text];
-    const t = text.trim();
+    let t = text.trim();
+
+    // 0. Segment container fill pattern: In [the] <container>, enter/type/write [exactly]: <value>
+    const containerFillPattern = /In\s+(?:the\s+)?([a-zA-Z0-9_\-\s]+?),\s*(?:enter|type|write|fill|put)(?:\s+exactly)?:\s*([\s\S]+?)(?=(?:\.|\s+)?\s*(?:then|and\s+then|after\s+that)\s+(?:click|press|tap|submit|select|open)\b|[.;]?\s*$)/i;
+    const m = t.match(containerFillPattern);
+    if (m) {
+      const before = t.slice(0, m.index).trim();
+      const fillClause = m[0].trim();
+      const after = t.slice(m.index + m[0].length).trim();
+      const parts = [];
+      if (before) parts.push(...splitActionClauses(before));
+      parts.push(fillClause);
+      if (after) parts.push(...splitActionClauses(after));
+      return parts.map(p => p.trim()).filter(Boolean);
+    }
+
+    // 1. Sentence split on period followed by whitespace and capital letter or temporal word
+    const sentenceParts = t.split(/\.\s+(?=(?:(?:Once|When|After|As\s+soon\s+as)\s+|[A-Z]))/i);
+    if (sentenceParts.length > 1) {
+      const parts = [];
+      for (const sp of sentenceParts) {
+        const cleanSp = sp.trim().replace(/\.$/, '');
+        if (cleanSp) parts.push(...splitActionClauses(cleanSp));
+      }
+      return parts.map(p => p.trim()).filter(Boolean);
+    }
+
+    // 1b. Preserve introductory temporal/conditional clause prefix: "Once LinkedIn is loaded, <action>"
+    const temporalPrefixMatch = t.match(/^(?:Once|When|After|As\s+soon\s+as)\s+(?:the\s+)?[a-zA-Z0-9_\-\s]+?\s+(?:is\s+loaded|loads|has\s+loaded|is\s+open(?:ed)?|opens|appears),\s*/i);
+    if (temporalPrefixMatch) {
+      const prefix = temporalPrefixMatch[0];
+      const rest = t.slice(prefix.length).trim();
+      const restParts = splitActionClauses(rest);
+      if (restParts.length > 0) {
+        return [prefix + restParts[0], ...restParts.slice(1)];
+      }
+      return [t];
+    }
+
     const parts = t.split(ACTION_CONNECTOR_PATTERN);
     return parts.map(p => p.trim()).filter(Boolean);
   }
@@ -538,7 +758,8 @@
 
     const parts = s.split(/\s+/);
     if (parts.length < 2) return null;
-    if (/^(?:and|then|after|next|also|followed)$/i.test(parts[0])) return null;
+    if (/^(?:and|then|after|next|also|followed|but|ask|wait|stop|pause|confirm|approval|require|let|do|don't|not|never|if|when|while|until|so|or|once|as)$/i.test(parts[0])) return null;
+    if (/^(?:on|in|at|by|with|from|to|for|of|about|into|onto|upon)$/i.test(parts[0])) return null;
 
     const actionVerbPattern = /^(?:click|press|tap|open|scroll|select|choose|check|uncheck|toggle|tick|untick|enable|disable|turn|activate|deactivate|find|locate|search|look|go|navigate|fill|enter|type|put|set|write|compose|reply|send|submit|save|download|add)$/i;
 
@@ -547,6 +768,7 @@
     if (parts.length >= 3 && compoundFieldNouns.test(parts[1])) {
       if (actionVerbPattern.test(parts[0])) return null;
       const field = cleanFieldHint(parts[0] + " " + parts[1]);
+      if (!field) return null;
       const val = cleanValue(parts.slice(2).join(" "));
       if (field && val && !isPronounOrReference(field)) {
         return { type: "FILL", fieldHint: field, value: val };
@@ -555,7 +777,7 @@
 
     if (actionVerbPattern.test(parts[0])) return null;
     const field = cleanFieldHint(parts[0]);
-    if (actionVerbPattern.test(field)) return null;
+    if (!field || actionVerbPattern.test(field)) return null;
     const val = cleanValue(parts.slice(1).join(" "));
     if (field && val && !isPronounOrReference(field)) {
       return { type: "FILL", fieldHint: field, value: val };
@@ -784,8 +1006,35 @@
    * @returns {string}
    */
   function normalizeTaskPhrasing(rawTask) {
-    let text = normalizeText(rawTask);
+    if (!rawTask) return "";
+    let cleanRaw = String(rawTask)
+      .replace(/:\s*\r?\n/g, ': ')
+      .replace(/[\r\n]+/g, ', ');
+    let text = normalizeText(cleanRaw);
     if (!text) return "";
+
+    // Strip leading action connectors e.g. "Then click the Post button", "and then click..."
+    text = text.replace(/^(?:and\s+then|and|then|after\s+that|next|followed\s+by|also)\s+/i, "");
+
+    // 00a. Normalize "On/In <Platform>, <Action>" -> "open <Platform> and <Action>"
+    text = text.replace(
+      /^\s*(?:on|in)\s+([a-zA-Z0-9_\-\.]+?(?:\s+website|\s+site|\s+portal)?)\s*,\s*(.+)$/i,
+      (match, platform, rest) => {
+        if (/^(?:this|the|a|an)\s+(?:form|field|input|box|page|email|message|modal|dialog|card|panel|document|table|row|list)$/i.test(platform.trim())) {
+          return match;
+        }
+        return `open ${platform.trim()} and ${rest.trim()}`;
+      }
+    );
+
+    // 00b. Normalize "set/fill [the] <f1> to/with <v1> and [the] <f2> to/with <v2>"
+    // -> "set <f1> to <v1> and set <f2> to <v2>"
+    text = text.replace(
+      /\b(set|fill)\s+(?:the\s+)?([a-zA-Z0-9_\-\s]+?)\s+(to|with)\s+([^,;]+?)\s+(?:and\s+then|and)\s+(?:the\s+)?([a-zA-Z0-9_\-\s]+?)\s+\3\s+([^,;]+?)(?=$|\s*[,;.])/gi,
+      (match, verb, f1, prep, v1, f2, v2) => {
+        return `${verb} ${f1.trim()} ${prep} ${v1.trim()} and ${verb} ${f2.trim()} ${prep} ${v2.trim()}`;
+      }
+    );
 
     // 0a. Normalize "find/locate/go to [the] <FIELD> [field/input/box/area/textbox] and/then enter/type/fill/put/set/write <VAL>"
     // or "... and enter/fill ... with/to/as/:/= <VAL>" or "... enter <VAL> in/into it"
@@ -800,10 +1049,10 @@
       }
     );
 
-    // 1. Normalize "find/locate/search for/look for [the] <TARGET> and/then/and then click/press/tap/select/use/open/download it/that/this/them/that button/that link/the above"
+    // 1. Normalize "find/locate/search for/look for [the] <TARGET> and/then/and then click/press/tap/select/use/open/download it/that/this/them/that button/that link/the above/its details"
     // -> "<verb> [the] <TARGET>"
     text = text.replace(
-      /\b(?:find|locate|search\s+for|look\s+for)\s+(?:the\s+)?((?:(?!\b(?:and|then)\b)[a-zA-Z0-9_\-\s])+?)\s*(?:,\s*(?:and\s+then\s+|and\s+|then\s+)?|\s+(?:and\s+then\s+|and\s+|then\s+))(click|press|tap|select|use|open|download)\s+(?:on\s+)?(?:it|that|this|them|that\s+button|this\s+button|that\s+link|this\s+link|the\s+above|above|the\s+field|that\s+field|this\s+field)\b/gi,
+      /\b(?:find|locate|search\s+for|look\s+for)\s+(?:the\s+)?((?:(?!\b(?:and|then)\b)[a-zA-Z0-9_\-\s\/])+?)\s*(?:,\s*(?:and\s+then\s+|and\s+|then\s+)?|\s+(?:and\s+then\s+|and\s+|then\s+))(click|press|tap|select|use|open|download)\s+(?:on\s+)?(?:it|that|this|them|that\s+button|this\s+button|that\s+link|this\s+link|the\s+above|above|the\s+field|that\s+field|this\s+field|(?:its|their)\s+(?:details|mission\s+details|page|info|information|link|view|description))\b/gi,
       (match, target, verb) => {
         const cleanTarget = target.trim();
         const v = (verb || "").toLowerCase();
@@ -818,13 +1067,13 @@
 
     // 1b. Normalize "find/locate/search for/look for [the] <TARGET> and turn it on/enable it" -> "enable [the] <TARGET>"
     text = text.replace(
-      /\b(?:find|locate|search\s+for|look\s+for)\s+(?:the\s+)?((?:(?!\b(?:and|then)\b)[a-zA-Z0-9_\-\s])+?)\s*(?:,\s*(?:and\s+then\s+|and\s+|then\s+)?|\s+(?:and\s+then\s+|and\s+|then\s+))(?:turn\s+(?:it|this|that)\s+on|enable\s+(?:it|this|that)|activate\s+(?:it|this|that))\b/gi,
+      /\b(?:find|locate|search\s+for|look\s+for)\s+(?:the\s+)?((?:(?!\b(?:and|then)\b)[a-zA-Z0-9_\-\s\/])+?)\s*(?:,\s*(?:and\s+then\s+|and\s+|then\s+)?|\s+(?:and\s+then\s+|and\s+|then\s+))(?:turn\s+(?:it|this|that)\s+on|enable\s+(?:it|this|that)|activate\s+(?:it|this|that))\b/gi,
       (match, target) => `enable ${target.trim()}`
     );
 
     // 2. Normalize "find/locate/search for/look for [the] <TARGET> button/link and/then click/press/tap/select/use/open it/that/that link/the above"
     text = text.replace(
-      /\b(?:find|locate|search\s+for|look\s+for)\s+(?:the\s+)?((?:(?!\b(?:and|then)\b)[a-zA-Z0-9_\-\s])+?)\s+(button|link)\s*(?:,\s*(?:and\s+then\s+|and\s+|then\s+)?|\s+(?:and\s+then\s+|and\s+|then\s+))(click|press|tap|select|use|open)\s+(?:on\s+)?(?:it|that|this|them|that\s+button|this\s+button|that\s+link|this\s+link|the\s+above|above|the\s+field|that\s+field|this\s+field)\b/gi,
+      /\b(?:find|locate|search\s+for|look\s+for)\s+(?:the\s+)?((?:(?!\b(?:and|then)\b)[a-zA-Z0-9_\-\s\/])+?)\s+(button|link)\s*(?:,\s*(?:and\s+then\s+|and\s+|then\s+)?|\s+(?:and\s+then\s+|and\s+|then\s+))(click|press|tap|select|use|open)\s+(?:on\s+)?(?:it|that|this|them|that\s+button|this\s+button|that\s+link|this\s+link|the\s+above|above|the\s+field|that\s+field|this\s+field)\b/gi,
       (match, target, type, verb) => {
         const cleanTarget = target.trim();
         const v = (verb || "").toLowerCase();
@@ -881,7 +1130,9 @@
         requireApprovalBeforeSend: false,
         doNotSend: false,
         doNotSubmit: false,
-        doNotBuy: false
+        doNotBuy: false,
+        requireApprovalBeforeSubmit: false,
+        requireApprovalBeforeBuy: false
       };
     }
     const constraints = [];
@@ -891,18 +1142,20 @@
     let doNotSend = false;
     let doNotSubmit = false;
     let doNotBuy = false;
+    let requireApprovalBeforeSubmit = false;
+    let requireApprovalBeforeBuy = false;
 
     const lower = text.toLowerCase();
 
-    // Check for do not send / don't send / don't click send
-    if (/\b(?:do\s+not\s+send(?:\s+it)?|don'?t\s+(?:click\s+)?send(?:\s+it)?|never\s+send)\b/i.test(lower)) {
+    // Check for do not send / don't send / don't click send (excluding approval-conditional send like "don't send until I approve")
+    if (/\b(?:do\s+not\s+send(?:\s+it)?|don'?t\s+(?:click\s+)?send(?:\s+it)?|never\s+send)\b(?!\s*until\s+i\s+approve)/i.test(lower)) {
       constraints.push("DO_NOT_SEND");
       doNotSend = true;
       if (!stopCondition) stopCondition = "DO_NOT_SEND";
     }
 
     // Check for do not submit / don't submit / don't click submit
-    if (/\b(?:do\s+not\s+submit(?:\s+it)?|don'?t\s+(?:click\s+)?submit(?:\s+it)?|never\s+submit)\b/i.test(lower)) {
+    if (/\b(?:do\s+not\s+submit(?:\s+it)?|don'?t\s+(?:click\s+)?submit(?:\s+it)?|never\s+submit)\b(?!\s*until\s+i\s+approve)/i.test(lower)) {
       constraints.push("DO_NOT_SUBMIT");
       doNotSubmit = true;
       if (!stopCondition) stopCondition = "DO_NOT_SUBMIT";
@@ -921,17 +1174,50 @@
       stopCondition = "AFTER_FILL";
     }
 
+    // Check for stop before submitting
+    if (/\b(?:stop\s+before\s+submitting|halt\s+before\s+submitting|pause\s+before\s+submitting)\b/i.test(lower)) {
+      constraints.push("STOP_BEFORE_SUBMIT");
+      stopCondition = "BEFORE_SUBMIT";
+      requireApprovalBeforeSubmit = true;
+    }
+
     // Check for prepare ... and wait / wait
     if (/\b(?:and\s+wait|prepare\s+.*and\s+wait|wait\s+for\s+user|just\s+prepare\s+it)\b/i.test(lower)) {
       constraints.push("WAIT_FOR_USER");
       if (!stopCondition) stopCondition = "WAIT_FOR_USER";
     }
 
-    // Check for confirmation / approval
-    if (/\b(?:ask\s+for\s+confirmation|require\s+confirmation|confirmation\s+first|only\s+send\s+after\s+approval|wait\s+for\s+approval|require\s+approval|need\s+approval|approval\s+before\s+send(?:ing)?)\b/i.test(lower)) {
+    // Check for confirmation / approval before sending
+    const approvalBeforeSendRegex = /\b(?:(?:ask|get)\s+(?:me\s+)?(?:for\s+)?(?:my\s+)?(?:approval|confirmation)\s+before\s+send(?:ing)?|ask\s+me\s+before\s+send(?:ing)?|get\s+(?:my\s+)?approval\s+before\s+send(?:ing)?|wait\s+for\s+(?:my\s+approval|approval|me)\s+before\s+send(?:ing)?|require\s+(?:my\s+)?(?:approval|confirmation)(?:\s+before\s+send(?:ing)?)?|confirm\s+with\s+me\s+before\s+send(?:ing)?|check\s+with\s+me\s+before\s+send(?:ing)?|(?:don'?t|do\s+not)\s+send(?:\s+it)?\s+until\s+i\s+approve|send\s+only\s+after\s+i\s+approve|only\s+send\s+after\s+(?:my\s+approval|approval|i\s+approve)|confirmation\s+first|wait\s+for\s+approval|need\s+approval|approval\s+before\s+send(?:ing)?)(?:\s+it)?\b/i;
+    if (approvalBeforeSendRegex.test(lower)) {
       constraints.push("REQUIRE_APPROVAL_BEFORE_SEND");
       requireApprovalBeforeSend = true;
       approvalRequirement = "HUMAN_CONFIRMATION_BEFORE_SEND";
+    }
+
+    // Check for confirmation / approval before submitting
+    const approvalBeforeSubmitRegex = /\b(?:(?:ask|get)\s+(?:me\s+)?(?:for\s+)?(?:my\s+)?(?:approval|confirmation)\s+before\s+submit(?:ting)?|ask\s+me\s+before\s+submit(?:ting)?|get\s+(?:my\s+)?approval\s+before\s+submit(?:ting)?|wait\s+for\s+(?:my\s+approval|approval|me)\s+before\s+submit(?:ting)?|require\s+(?:my\s+)?(?:approval|confirmation)(?:\s+before\s+submit(?:ting)?)?|confirm\s+with\s+me\s+before\s+submit(?:ting)?|check\s+with\s+me\s+before\s+submit(?:ting)?|(?:don'?t|do\s+not)\s+submit(?:\s+it)?\s+until\s+i\s+approve|submit\s+only\s+after\s+i\s+approve|only\s+submit\s+after\s+(?:my\s+approval|approval|i\s+approve)|approval\s+before\s+submit(?:ting)?|let\s+me\s+approve\s+(?:it\s+)?first(?:\s+before\s+submitting)?|do\s+not\s+(?:click\s+)?submit\s+automatically|don'?t\s+(?:click\s+)?submit\s+automatically)(?:\s+it)?\b/i;
+    if (approvalBeforeSubmitRegex.test(lower)) {
+      constraints.push("REQUIRE_APPROVAL_BEFORE_SUBMIT");
+      requireApprovalBeforeSubmit = true;
+      if (!approvalRequirement) approvalRequirement = "HUMAN_CONFIRMATION_BEFORE_SUBMIT";
+      if (!stopCondition) stopCondition = "BEFORE_SUBMIT";
+    }
+
+    // Check for confirmation / approval before checkout / buying / purchasing
+    const approvalBeforeBuyRegex = /\b(?:(?:ask|get)\s+(?:me\s+)?(?:for\s+)?(?:my\s+)?(?:approval|confirmation)\s+before\s+(?:checkout|buy(?:ing)?|purchas(?:e|ing)|order(?:ing)?)|ask\s+me\s+before\s+(?:checkout|buy(?:ing)?|purchas(?:e|ing)|order(?:ing)?)|wait\s+for\s+(?:my\s+approval|approval|me)\s+before\s+(?:checkout|buy(?:ing)?|purchas(?:e|ing)|order(?:ing)?)|approval\s+before\s+(?:checkout|buy(?:ing)?|purchas(?:e|ing)|order(?:ing)?))\b/i;
+    if (approvalBeforeBuyRegex.test(lower)) {
+      constraints.push("REQUIRE_APPROVAL_BEFORE_PURCHASE");
+      requireApprovalBeforeBuy = true;
+      if (!approvalRequirement) approvalRequirement = "HUMAN_CONFIRMATION_BEFORE_PURCHASE";
+      if (!stopCondition) stopCondition = "BEFORE_PURCHASE";
+    }
+
+    // Check for generic stop and ask / human approval directives
+    const generalApprovalRegex = /\b(?:let\s+me\s+approve\s+it\s+first|stop\s+and\s+ask\s+me|ask\s+me\s+before\s+(?:proceeding|doing\s+so|final\s+submission)|pause\s+for\s+(?:my\s+)?approval)\b/i;
+    if (generalApprovalRegex.test(lower)) {
+      constraints.push("REQUIRE_APPROVAL");
+      if (!approvalRequirement) approvalRequirement = "HUMAN_CONFIRMATION";
     }
 
     return {
@@ -939,6 +1225,8 @@
       stopCondition,
       approvalRequirement,
       requireApprovalBeforeSend,
+      requireApprovalBeforeSubmit,
+      requireApprovalBeforeBuy,
       doNotSend,
       doNotSubmit,
       doNotBuy
@@ -956,20 +1244,35 @@
     if (!text || typeof text !== "string") return "";
     let s = text;
     // Strip control phrases cleanly (including connectors like "but", "and", "then"):
-    // 1. "stop after filling [the reply]", "stop before sending", etc.
-    s = s.replace(/(?:,\s*|\s+)?(?:\b(?:but|and\s+then|and|then|also)\b\s*)?\b(?:stop\s+after\s+filling(?:\s+the\s+reply)?|stop\s+before\s+sending|pause\s+after\s+filling|halt\s+after\s+filling)\b[.,;!?]?/gi, " ");
-    // 2. "do not send [it]", "don't send [it]", "don't click send", "never send", etc.
-    s = s.replace(/(?:,\s*|\s+)?(?:\b(?:but|and\s+then|and|then|also)\b\s*)?\b(?:do\s+not\s+send(?:\s+it)?|don'?t\s+(?:click\s+)?send(?:\s+it)?|never\s+send)\b[.,;!?]?/gi, " ");
-    // 3. "do not submit [it]", "don't submit [it]", "don't click submit", "never submit", etc.
-    s = s.replace(/(?:,\s*|\s+)?(?:\b(?:but|and\s+then|and|then|also)\b\s*)?\b(?:do\s+not\s+submit(?:\s+it)?|don'?t\s+(?:click\s+)?submit(?:\s+it)?|never\s+submit)\b[.,;!?]?/gi, " ");
-    // 4. "do not buy [it]", "don't buy [it]", etc.
+    // 1. Approval before sending control phrases (MUST RUN FIRST before generic "wait")
+    s = s.replace(
+      /(?:,\s*|\s+)?(?:\b(?:but|and\s+then|and|then|also)\b\s*)?\b(?:(?:ask|get)\s+(?:me\s+)?(?:for\s+)?(?:my\s+)?(?:approval|confirmation)\s+before\s+send(?:ing)?|ask\s+me\s+before\s+send(?:ing)?|get\s+(?:my\s+)?approval\s+before\s+send(?:ing)?|wait\s+for\s+(?:my\s+approval|approval|me)\s+before\s+send(?:ing)?|require\s+(?:my\s+)?(?:approval|confirmation)(?:\s+before\s+send(?:ing)?)?|confirm\s+with\s+me\s+before\s+send(?:ing)?|check\s+with\s+me\s+before\s+send(?:ing)?|(?:don'?t|do\s+not)\s+send(?:\s+it)?\s+until\s+i\s+approve|send\s+only\s+after\s+i\s+approve|only\s+send\s+after\s+(?:my\s+approval|approval|i\s+approve)|confirmation\s+first|wait\s+for\s+approval|need\s+approval|approval\s+before\s+send(?:ing)?)(?:\s+it)?\b[.,;!?]?/gi,
+      " "
+    );
+    // 1b. Approval before submitting control phrases
+    s = s.replace(
+      /(?:,\s*|\s+)?(?:\b(?:but|and\s+then|and|then|also)\b\s*)?\b(?:(?:ask|get)\s+(?:me\s+)?(?:for\s+)?(?:my\s+)?(?:approval|confirmation)\s+before\s+submit(?:ting)?|ask\s+me\s+before\s+submit(?:ting)?|get\s+(?:my\s+)?approval\s+before\s+submit(?:ting)?|wait\s+for\s+(?:my\s+approval|approval|me)\s+before\s+submit(?:ting)?|require\s+(?:my\s+)?(?:approval|confirmation)(?:\s+before\s+submit(?:ting)?)?|confirm\s+with\s+me\s+before\s+submit(?:ting)?|check\s+with\s+me\s+before\s+submit(?:ting)?|(?:don'?t|do\s+not)\s+submit(?:\s+it)?\s+until\s+i\s+approve|submit\s+only\s+after\s+i\s+approve|only\s+submit\s+after\s+(?:my\s+approval|approval|i\s+approve)|approval\s+before\s+submit(?:ting)?|let\s+me\s+approve\s+(?:it\s+)?first(?:\s+before\s+submitting)?|do\s+not\s+(?:click\s+)?submit\s+automatically|don'?t\s+(?:click\s+)?submit\s+automatically)(?:\s+it)?\b[.,;!?]?/gi,
+      " "
+    );
+    // 1c. Approval before purchasing / checkout
+    s = s.replace(
+      /(?:,\s*|\s+)?(?:\b(?:but|and\s+then|and|then|also)\b\s*)?\b(?:(?:ask|get)\s+(?:me\s+)?(?:for\s+)?(?:my\s+)?(?:approval|confirmation)\s+before\s+(?:checkout|buy(?:ing)?|purchas(?:e|ing)|order(?:ing)?)|ask\s+me\s+before\s+(?:checkout|buy(?:ing)?|purchas(?:e|ing)|order(?:ing)?)|wait\s+for\s+(?:my\s+approval|approval|me)\s+before\s+(?:checkout|buy(?:ing)?|purchas(?:e|ing)|order(?:ing)?)|approval\s+before\s+(?:checkout|buy(?:ing)?|purchas(?:e|ing)|order(?:ing)?))\b[.,;!?]?/gi,
+      " "
+    );
+    // 2. "stop after filling [the reply]", "stop before sending", "stop before submitting", etc.
+    s = s.replace(/(?:,\s*|\s+)?(?:\b(?:but|and\s+then|and|then|also)\b\s*)?\b(?:stop\s+after\s+filling(?:\s+the\s+reply)?|stop\s+before\s+(?:sending|submitting|checkout|purchasing)|pause\s+after\s+filling|halt\s+after\s+filling|halt\s+before\s+(?:sending|submitting))\b[.,;!?]?/gi, " ");
+    // 2b. Generic approval / confirmation directives
+    s = s.replace(/(?:,\s*|\s+)?(?:\b(?:but|and\s+then|and|then|also)\b\s*)?\b(?:let\s+me\s+approve\s+it\s+first|stop\s+and\s+ask\s+me|pause\s+for\s+(?:my\s+)?approval|ask\s+me\s+before\s+(?:proceeding|doing\s+so|final\s+submission))\b[.,;!?]?/gi, " ");
+    // 3. "do not send [it]", "don't send [it]", "don't click send", "never send", etc.
+    s = s.replace(/(?:,\s*|\s+)?(?:\b(?:but|and\s+then|and|then|also)\b\s*)?\b(?:do\s+not\s+send(?:\s+it)?|don'?t\s+(?:click\s+)?send(?:\s+it)?|never\s+send)(?!\s*until\s+i\s+approve)\b[.,;!?]?/gi, " ");
+    // 4. "do not submit [it]", "don't submit [it]", "don't click submit", "never submit", etc.
+    s = s.replace(/(?:,\s*|\s+)?(?:\b(?:but|and\s+then|and|then|also)\b\s*)?\b(?:do\s+not\s+submit(?:\s+it)?|don'?t\s+(?:click\s+)?submit(?:\s+it)?|never\s+submit)(?!\s*until\s+i\s+approve)\b[.,;!?]?/gi, " ");
+    // 5. "do not buy [it]", "don't buy [it]", etc.
     s = s.replace(/(?:,\s*|\s+)?(?:\b(?:but|and\s+then|and|then|also)\b\s*)?\b(?:do\s+not\s+(?:buy|purchase|checkout|order)(?:\s+it)?|don'?t\s+(?:buy|purchase|checkout|order)(?:\s+it)?|never\s+(?:buy|purchase))\b[.,;!?]?/gi, " ");
-    // 5. "and wait", "prepare ... and wait"
+    // 6. "and wait", "prepare ... and wait"
     s = s.replace(/(?:,\s*|\s+)?(?:\b(?:and\s+then|and|then)\b\s*)?\b(?:wait\s+for\s+user|just\s+prepare\s+it|wait)\b[.,;!?]?/gi, " ");
-    // 6. "ask for confirmation [before sending]", "require confirmation", "confirmation first", etc.
-    s = s.replace(/(?:,\s*|\s+)?(?:\b(?:but|and\s+then|and|then|also)\b\s*)?\b(?:ask\s+for\s+confirmation(?:\s+before\s+sending)?|require\s+confirmation(?:\s+before\s+sending)?|confirmation\s+first|only\s+send\s+after\s+approval|wait\s+for\s+approval|require\s+approval(?:\s+before\s+sending)?|approval\s+before\s+send(?:ing)?)\b[.,;!?]?/gi, " ");
     // Clean any trailing conjunctions left orphaned at end of text (e.g. "Reply to this email but" -> "Reply to this email")
-    s = s.replace(/\s+(?:but|and|then|also|after\s+that)\s*$/i, "");
+    s = s.replace(/\s+(?:but|and|then|also|after\s+that|so|yet)\s*$/i, "");
     return s.replace(/\s+/g, " ").trim().replace(/[.,;!?]+$/, "").trim();
   }
 
@@ -990,10 +1293,33 @@
 
     // 1. Reply with explicit value:
     // e.g. "Reply to the currently open email with: ...", "Reply to the open email with Hello", "Reply to this email saying thank you", "Reply with ..."
-    const replyWithMatch = t.match(/^(?:reply|draft\s+(?:a\s+)?reply|write\s+(?:a\s+)?reply)(?:\s+(?:to\s+)?(?:the\s+)?(?:currently\s+)?(?:open\s+)?(?:this\s+)?(?:email|mail|message))?\s*(?:saying|with\s*[:\s]+|:\s*)(.+)$/i);
+    const replyWithMatch = t.match(/^(?:reply|draft\s+(?:a\s+)?reply|write\s+(?:a\s+)?reply|prepare\s+(?:a\s+)?reply)(?:\s+(?:to\s+)?(?:the\s+)?(?:currently\s+)?(?:open\s+)?(?:this\s+)?(?:email|mail|message))?\s*(?:saying|with\s*[:\s]+|:\s*)(.+)$/i);
     if (replyWithMatch) {
       let replyBody = replyWithMatch[1].trim();
+
+      // Clean leading message preambles such as "the message ", "message ", "the text ", "text ", "saying ", ":"
+      replyBody = replyBody.replace(/^(?:the\s+message\s+(?:saying\s+|that\s+)?|message\s+(?:saying\s+|that\s+)?|the\s+text\s+(?:saying\s+|that\s+)?|text\s+(?:saying\s+|that\s+)?|saying\s*[:\s]*|that\s*[:\s]*|:\s*)/i, "").trim();
+      replyBody = replyBody.replace(/^[:\s]+/, "").trim();
+
+      // Isolate quoted content if the reply starts with quotation marks
+      const leadingDoubleMatch = replyBody.match(/^["“”]([\s\S]*?)["”]/);
+      const leadingSingleMatch = replyBody.match(/^['‘’]([\s\S]*?)['’]/);
+      if (leadingDoubleMatch) {
+        replyBody = leadingDoubleMatch[1].trim();
+      } else if (leadingSingleMatch) {
+        replyBody = leadingSingleMatch[1].trim();
+      } else {
+        replyBody = cleanValue(replyBody);
+      }
+
+      // Re-strip leading preambles if exposed after outer quotes removed
+      replyBody = replyBody.replace(/^(?:the\s+message\s+(?:saying\s+|that\s+)?|message\s+(?:saying\s+|that\s+)?|the\s+text\s+(?:saying\s+|that\s+)?|text\s+(?:saying\s+|that\s+)?|saying\s*[:\s]*|that\s*[:\s]*|:\s*)/i, "").trim();
+      replyBody = replyBody.replace(/^[:\s]+/, "").trim();
+
+      // Ensure no trailing execution control clauses leaked into reply content
+      replyBody = replyBody.replace(/(?:,\s*|\s+)?(?:\b(?:but|and\s+then|and|then|also)\b\s*)?\b(?:(?:ask|get)\s+(?:me\s+)?(?:for\s+)?(?:my\s+)?(?:approval|confirmation)\s+before\s+(?:send(?:ing)?|submit(?:ting)?)|ask\s+me\s+before\s+(?:send(?:ing)?|submit(?:ting)?)|wait\s+for\s+(?:my\s+approval|approval|me)\s+before\s+(?:send(?:ing)?|submit(?:ting)?)|(?:don'?t|do\s+not)\s+(?:send|submit)(?:\s+it)?|stop\s+before\s+(?:send(?:ing)?|submit(?:ting)?)).*$/i, "").trim();
       replyBody = cleanValue(replyBody);
+
       if (!replyBody) replyBody = "...";
 
       const steps = [
@@ -1011,7 +1337,11 @@
           fieldHint: "Reply message body",
           expectedRole: "textarea/contenteditable",
           role: "textarea/contenteditable",
+          targetRole: "contenteditable",
+          target: "Reply message body",
           semanticTarget: "Reply message body",
+          context: "communication_composer",
+          composerType: "reply",
           value: replyBody
         }
       ];
@@ -1056,7 +1386,11 @@
           fieldHint: "Reply message body",
           expectedRole: "textarea/contenteditable",
           role: "textarea/contenteditable",
+          targetRole: "contenteditable",
+          target: "Reply message body",
           semanticTarget: "Reply message body",
+          context: "communication_composer",
+          composerType: "reply",
           value: ""
         });
       }
@@ -1081,6 +1415,420 @@
   }
 
   /**
+   * Section 3d: Recognizes generic communication and composer workflows (LinkedIn Post, Messaging, Chat).
+   * Produces ordered actions:
+   * 1. (Optional) NAVIGATE -> site
+   * 2. (Optional Search) FILL search -> SUBMIT search -> CLICK result
+   * 3. CLICK -> Start a post / Message
+   * 4. FILL -> communication composer (context: "communication_composer", composerType: "post"|"message")
+   * 5. CLICK -> Post / Send (requiresApproval: true, risk: "HIGH")
+   *
+   * @param {string} text
+   * @param {Object} [constraints]
+   * @returns {Array<Object>|null}
+   */
+  function parseCommunicationWorkflow(text, constraints) {
+    if (!text || typeof text !== "string") return null;
+    const t = text.trim();
+    if (!t) return null;
+
+    // Helper to clean message/post value: isolates text, strips surrounding quotes, preserves punctuation & emoji
+    function extractValue(rawVal) {
+      if (!rawVal) return "";
+      let val = rawVal.trim();
+      val = val.replace(/^(?:saying\s+|as\s+|with\s+|that\s+says\s+|the\s+message\s+(?:saying\s+|that\s+says\s+|as\s+|:\s*)?|message\s+(?:saying\s+|as\s+|:\s*)?|the\s+text\s+(?:saying\s+|as\s+|:\s*)?|text\s+(?:saying\s+|as\s+|:\s*)?|:\s*)/i, "").trim();
+      
+      // Isolate quoted text if user provided quotes, ignoring trailing approval/constraint clauses outside quotes
+      const quoteMatch = val.match(/^["“'‘]([\s\S]*?)["”'’](?:\s*(?:[.,;]\s*|\s+)?(?:\b(?:and\s+then|and|then)\b\s*)?(?:(?:wait\s+for|ask\s+for|request|require)\s+(?:human\s+|my\s+|user\s+)?approval|don'?t\s+(?:post|send|publish)|do\s+not\s+(?:post|send|publish)|stop\s+before\s+(?:posting|sending|publishing)|wait\s+before\s+(?:posting|sending|publishing))[\s\S]*)?$/i);
+      if (quoteMatch) {
+        val = quoteMatch[1].trim();
+      } else {
+        const doubleMatch = val.match(/^["“”]([\s\S]*?)["”]$/);
+        const singleMatch = val.match(/^['‘’]([\s\S]*?)['’]$/);
+        if (doubleMatch) {
+          val = doubleMatch[1].trim();
+        } else if (singleMatch) {
+          val = singleMatch[1].trim();
+        }
+      }
+      
+      // Explicitly strip any trailing human approval instruction so it never becomes part of the message content
+      val = val.replace(/(?:[.,;]\s*|\s+)?(?:\b(?:and\s+then|and|then)\b\s*)?(?:(?:wait\s+for|ask\s+for|request|require)\s+(?:human\s+|my\s+|user\s+)?approval|don'?t\s+(?:post|send|publish)|do\s+not\s+(?:post|send|publish)|stop\s+before\s+(?:posting|sending|publishing)|wait\s+before\s+(?:posting|sending|publishing))[\s\S]*$/i, "").trim();
+
+      val = val.replace(/^(?:saying\s+|that\s+says\s+|the\s+message\s+|message\s+|the\s+text\s+|text\s+|:\s*)/i, "").trim();
+      return val;
+    }
+
+    const doNotSend = constraints && (constraints.doNotSend || constraints.stopCondition === "AFTER_FILL");
+
+    // ----------------------------------------------------
+    // WORKFLOW A: LINKEDIN POST WORKFLOW
+    // ----------------------------------------------------
+    // e.g. "Open LinkedIn, click Start a post and write Thought of the day: keep learning."
+    // e.g. "Open LinkedIn and click Start a post and write Hello everyone."
+    // e.g. "click Start a post and write ..."
+    // e.g. "create a LinkedIn post saying ..."
+    // e.g. "type X in the post", "write a post saying X", "post X on LinkedIn"
+    const postPattern1 = /^(?:(?:open|navigate\s+to|go\s+to|launch|visit)\s+(?:the\s+)?([a-zA-Z0-9_\-]+)(?:\s+website|\s+site)?\s*(?:[.,;]\s*|\s+)?(?:\b(?:and\s+then|and|then)\b\s*)?)?(?:(?:click|press|tap|select)\s+(?:on\s+)?(?:the\s+)?)?start\s+a\s+post\s*(?:,\s*|\s+)?(?:\b(?:and\s+then|and|then)\b\s*)?(?:write|type|enter)(?:\s+(?:a\s+)?(?:message|post|text))?(?:\s+(?:saying|as|with|that\s+says|:))?\s*[:\s]*([\s\S]+)$/i;
+
+    const postPattern2 = /^(?:(?:open|navigate\s+to|go\s+to|launch|visit)\s+(?:the\s+)?([a-zA-Z0-9_\-]+)(?:\s+website|\s+site)?\s*(?:[.,;]\s*|\s+)?(?:\b(?:and\s+then|and|then)\b\s*)?)?(?:create|make|write|draft|start)\s+(?:a\s+)?(?:linkedin\s+)?post\s*(?:and\s+write\s+|and\s+type\s+|saying\s+|that\s+says\s+|with\s+|as\s+|:\s*|\s+)([\s\S]+)$/i;
+
+    const postPattern3 = /^(?:(?:open|navigate\s+to|go\s+to|launch|visit)\s+(?:the\s+)?([a-zA-Z0-9_\-]+)(?:\s+website|\s+site)?\s*(?:[.,;]\s*|\s+)?(?:\b(?:and\s+then|and|then)\b\s*)?)?(?:write|type|enter)\s+(?:a\s+message\s+|a\s+post\s+|text\s+)?([\s\S]+?)\s+(?:in|into|inside)\s+(?:the\s+)?(?:linkedin\s+)?(?:post\s+composer|post\s+editor|post)\b/i;
+
+    const postPattern4 = /^(?:post|publish|share)\s+([\s\S]+?)\s+(?:on|to)\s+(?:linkedin)\b/i;
+
+    const mPost = t.match(postPattern1) || t.match(postPattern2) || t.match(postPattern3) || t.match(postPattern4);
+    if (mPost) {
+      let navSite = mPost[1] ? mPost[1].trim() : null;
+      let rawVal = mPost[2] ? mPost[2].trim() : (mPost[1] ? mPost[1].trim() : "");
+      if (t.match(postPattern4)) {
+        navSite = "LinkedIn";
+        rawVal = mPost[1] ? mPost[1].trim() : "";
+      } else if (!navSite && /\blinkedin\b/i.test(t)) {
+        navSite = "LinkedIn";
+      }
+      const postValue = extractValue(rawVal);
+      if (postValue) {
+        const steps = [];
+        if (navSite) {
+          steps.push({
+            type: "NAVIGATE",
+            action: "NAVIGATE",
+            targetHint: navSite,
+            target: navSite,
+            url: resolveNavigationUrl(navSite),
+            isNavigation: true,
+            legacyTarget: null
+          });
+        }
+        steps.push({
+          type: "CLICK",
+          action: "CLICK",
+          targetHint: "Start a post",
+          target: "Start a post",
+          semanticTarget: "Start a post",
+          semanticCategory: "button",
+          expectedRole: "button",
+          role: "button",
+          expectedTransition: "post_composer_open"
+        });
+        steps.push({
+          type: "FILL",
+          action: "FILL",
+          fieldHint: "post composer",
+          target: "LinkedIn post composer",
+          semanticTarget: "LinkedIn post composer",
+          expectedRole: "POST_COMPOSER",
+          targetRole: "POST_COMPOSER",
+          target_role: "POST_COMPOSER",
+          semanticRole: "POST_COMPOSER",
+          role: "contenteditable",
+          context: "communication_composer",
+          composerType: "post",
+          expectedTransition: "composer_filled",
+          value: postValue,
+          requestedIntent: "write a post"
+        });
+        if (!doNotSend) {
+          steps.push({
+            type: "CLICK",
+            action: "CLICK",
+            targetHint: "Post",
+            target: "Post",
+            semanticTarget: "Post",
+            expectedRole: "button",
+            role: "button",
+            requiresApproval: true,
+            risk: "HIGH",
+            riskLevel: "HIGH",
+            expectedTransition: "post_published",
+            approvalReason: "LinkedIn post is prepared but not published",
+            approvalAction: "WAIT_FOR_APPROVAL"
+          });
+        }
+        return steps;
+      }
+    }
+
+    // ----------------------------------------------------
+    // WORKFLOW B: SEARCH + MESSAGE WORKFLOW
+    // ----------------------------------------------------
+    // e.g. "Open LinkedIn, search for Vishwanath Archak M R, click Message and write Thank you."
+    // e.g. "Open LinkedIn, search for Vishwanath Archak M R, click Message and send a message saying thank you."
+    // e.g. "search for <person>, click Message and write <message>"
+    const searchMsgPattern = /^(?:(?:open|navigate\s+to|go\s+to|launch|visit)\s+(?:the\s+)?([a-zA-Z0-9_\-]+)(?:\s+website|\s+site)?\s*(?:[.,;]\s*|\s+)?(?:\b(?:and\s+then|and|then)\b\s*)?)?(?:search\s+(?:for\s+)?|find\s+|look\s+for\s+)(.+?)(?:\s+on\s+[a-zA-Z0-9_\-]+|\s+in\s+[a-zA-Z0-9_\-]+)?\s*(?:,\s*|\s+)(?:and\s+then\s+|and\s+|then\s+)?(?:(?:open|click|select|view)(?:\s+(?:on\s+)?(?:the\s+)?(?:profile|result|person|account|it|that|their\s+profile))?\s*(?:,\s*|\s+)?(?:\b(?:and\s+then|and|then)\b\s*)?)?(?:(?:click|press|tap)\s+(?:on\s+)?(?:the\s+)?)?message(?:\s+button)?\s*(?:,\s*|\s+)?(?:\b(?:and\s+then|and|then)\b\s*)?(?:(?:write|type|enter|send)(?:\s+(?:a\s+)?(?:message|text))?(?:\s+(?:saying|as|with|that\s+says|:))?)\s*[:\s]*([\s\S]+)$/i;
+
+    const mSearchMsg = t.match(searchMsgPattern);
+    if (mSearchMsg) {
+      let navSite = mSearchMsg[1] ? mSearchMsg[1].trim() : null;
+      if (!navSite && /\bon\s+([a-zA-Z0-9_\-]+)/i.test(t)) {
+        const onMatch = t.match(/\bon\s+([a-zA-Z0-9_\-]+)/i);
+        if (onMatch && /^(?:linkedin|twitter|x|facebook|instagram|github|gmail)$/i.test(onMatch[1])) {
+          navSite = onMatch[1];
+        }
+      }
+      const rawPerson = mSearchMsg[2] ? mSearchMsg[2].trim() : "";
+      const rawMsg = mSearchMsg[3] ? mSearchMsg[3].trim() : "";
+      const personName = cleanValue(rawPerson);
+      const messageValue = extractValue(rawMsg);
+
+      if (personName && messageValue) {
+        const steps = [];
+        if (navSite) {
+          steps.push({
+            type: "NAVIGATE",
+            action: "NAVIGATE",
+            targetHint: navSite,
+            target: navSite,
+            url: resolveNavigationUrl(navSite),
+            isNavigation: true,
+            legacyTarget: null
+          });
+        }
+        steps.push({
+          type: "FILL",
+          action: "FILL",
+          fieldHint: "search",
+          target: "PRIMARY_SEARCH_INPUT",
+          targetRole: "PRIMARY_SEARCH_INPUT",
+          expectedRole: "PRIMARY_SEARCH_INPUT",
+          role: "PRIMARY_SEARCH_INPUT",
+          semanticTarget: "PRIMARY_SEARCH_INPUT",
+          isSearchIntent: true,
+          value: personName
+        });
+        steps.push({
+          type: "SUBMIT",
+          action: "SUBMIT",
+          targetHint: "search",
+          target: "PRIMARY_SEARCH_INPUT",
+          semanticTarget: "PRIMARY_SEARCH_INPUT",
+          query: personName
+        });
+        steps.push({
+          type: "CLICK",
+          action: "OPEN",
+          targetHint: personName,
+          target: personName,
+          semanticTarget: personName,
+          query: personName,
+          domain: navSite ? (KNOWN_ENTITY_DOMAINS[navSite.toLowerCase()] || null) : null,
+          isSearchResult: true,
+          isProductSelection: true,
+          isExplicitTarget: true,
+          explicitTarget: personName,
+          targetEntity: { type: "person", name: personName },
+          targetIntent: "profile",
+          semanticCategory: "person",
+          role: "link",
+          expectedRole: "link"
+        });
+        steps.push({
+          type: "CLICK",
+          action: "CLICK",
+          targetHint: "Message",
+          target: "Message",
+          semanticTarget: "Message",
+          expectedRole: "button",
+          role: "button",
+          expectedTransition: "message_composer_open"
+        });
+        steps.push({
+          type: "FILL",
+          action: "FILL",
+          fieldHint: "message",
+          target: "communication message body",
+          semanticTarget: "communication message body",
+          expectedRole: "contenteditable",
+          targetRole: "contenteditable",
+          role: "contenteditable",
+          context: "communication_composer",
+          composerType: "message",
+          expectedTransition: "message_filled",
+          value: messageValue
+        });
+        if (!doNotSend) {
+          steps.push({
+            type: "CLICK",
+            action: "CLICK",
+            targetHint: "Send",
+            target: "Send",
+            semanticTarget: "Send",
+            expectedRole: "button",
+            role: "button",
+            requiresApproval: true,
+            risk: "HIGH",
+            riskLevel: "HIGH"
+          });
+        }
+        return steps;
+      }
+    }
+
+    // ----------------------------------------------------
+    // WORKFLOW C: DIRECT MESSAGE WORKFLOW
+    // ----------------------------------------------------
+    // e.g. "click Message and write Thank you"
+    // e.g. "click Message and send a message saying Thank you"
+    // e.g. "open LinkedIn, click Message and write Hello"
+    const directMsgPattern = /^(?:(?:open|navigate\s+to|go\s+to|launch|visit)\s+(?:the\s+)?([a-zA-Z0-9_\-]+)(?:\s+website|\s+site)?\s*(?:[.,;]\s*|\s+)?(?:\b(?:and\s+then|and|then)\b\s*)?)?(?:(?:click|press|tap)\s+(?:on\s+)?(?:the\s+)?)?message(?:\s+button)?\s*(?:,\s*|\s+)?(?:\b(?:and\s+then|and|then)\b\s*)?(?:(?:write|type|enter|send)(?:\s+(?:a\s+)?(?:message|text))?(?:\s+(?:saying|as|with|that\s+says|:))?)\s*[:\s]*([\s\S]+)$/i;
+
+    const mDirectMsg = t.match(directMsgPattern);
+    if (mDirectMsg) {
+      const navSite = mDirectMsg[1] ? mDirectMsg[1].trim() : null;
+      const rawMsg = mDirectMsg[2] ? mDirectMsg[2].trim() : "";
+      const messageValue = extractValue(rawMsg);
+      if (messageValue) {
+        const steps = [];
+        if (navSite) {
+          steps.push({
+            type: "NAVIGATE",
+            action: "NAVIGATE",
+            targetHint: navSite,
+            target: navSite,
+            url: resolveNavigationUrl(navSite),
+            isNavigation: true,
+            legacyTarget: null
+          });
+        }
+        steps.push({
+          type: "CLICK",
+          action: "CLICK",
+          targetHint: "Message",
+          target: "Message",
+          semanticTarget: "Message",
+          expectedRole: "button",
+          role: "button",
+          expectedTransition: "message_composer_open"
+        });
+        steps.push({
+          type: "FILL",
+          action: "FILL",
+          fieldHint: "message",
+          target: "communication message body",
+          semanticTarget: "communication message body",
+          expectedRole: "contenteditable",
+          targetRole: "contenteditable",
+          role: "contenteditable",
+          context: "communication_composer",
+          composerType: "message",
+          expectedTransition: "message_filled",
+          value: messageValue
+        });
+        if (!doNotSend) {
+          steps.push({
+            type: "CLICK",
+            action: "CLICK",
+            targetHint: "Send",
+            target: "Send",
+            semanticTarget: "Send",
+            expectedRole: "button",
+            role: "button",
+            requiresApproval: true,
+            risk: "HIGH",
+            riskLevel: "HIGH"
+          });
+        }
+        return steps;
+      }
+    }
+
+    return null;
+  }
+
+  /**
+   * Section 3c: Recognizes natural conditional execution instructions:
+   * e.g. "If a language-selection page appears, click English", "Click English if the language page appears",
+   * "If the site asks for confirmation, stop and ask me."
+   *
+   * @param {string} text
+   * @param {Object} [constraints]
+   * @returns {Array<Object>|null}
+   */
+  function parseConditionalClause(text, constraints) {
+    if (!text || typeof text !== "string") return null;
+    const t = text.trim().replace(/[.!?]+$/, "").trim();
+
+    // Pattern 1: "If / When / In case <condition>, [then] <action> [, then <nextAction>]"
+    const leadingIfMatch = t.match(/^(?:if|when|in\s+case)\s+(.+?)(?:,\s*(?:then\s+)?|\s+then\s+|\s*;\s*|\s+--\s+)(.+)$/i);
+    if (leadingIfMatch) {
+      const conditionText = leadingIfMatch[1].trim();
+      const rawActionText = leadingIfMatch[2].trim();
+
+      // Check if actionText is an approval/control directive e.g. "stop and ask me", "wait for my approval"
+      if (/\b(?:stop\s+and\s+ask(?:\s+me)?|pause\s+and\s+ask|ask\s+me|wait\s+for\s+(?:my\s+)?approval|stop|halt|pause)\b/i.test(rawActionText)) {
+        if (constraints) {
+          constraints.constraints.push("STOP_ON_CONDITION: " + conditionText);
+          constraints.approvalRequirement = "HUMAN_CONFIRMATION_ON_CONDITION";
+        }
+        return null;
+      }
+
+      let mainActionText = rawActionText;
+      let trailingNextActions = null;
+      const thenMatch = rawActionText.match(/^(.*?)(?:,\s*then|\s+then|\s*;\s*then|\s*,\s*and\s+then|\s+and\s+then)\s+(.+)$/i);
+      if (thenMatch) {
+        mainActionText = thenMatch[1].trim();
+        trailingNextActions = thenMatch[2].trim();
+      }
+
+      const parsedAction = parseTask(mainActionText, true);
+      if (parsedAction && Array.isArray(parsedAction.steps) && parsedAction.steps.length > 0 && parsedAction.steps[0].type !== "NONE") {
+        const condSteps = parsedAction.steps.map((st) => ({
+          ...st,
+          isConditional: true,
+          conditional: true,
+          condition: conditionText
+        }));
+
+        if (trailingNextActions) {
+          const nextRes = parseTask(trailingNextActions, true);
+          if (nextRes && Array.isArray(nextRes.steps) && nextRes.steps.length > 0 && nextRes.steps[0].type !== "NONE") {
+            condSteps.push(...nextRes.steps);
+          }
+        }
+
+        return condSteps;
+      }
+    }
+
+    // Pattern 2: "<action> if / when / in case <condition> [, then <nextAction>]"
+    const trailingIfMatch = t.match(/^((?:click|press|tap|open|select|choose|navigate\s+to|go\s+to)\s+.+?)\s+(?:if|when|in\s+case)\s+(.+)$/i);
+    if (trailingIfMatch) {
+      const actionText = trailingIfMatch[1].trim();
+      let conditionText = trailingIfMatch[2].trim();
+      let trailingNextActions = null;
+
+      const thenMatch = conditionText.match(/^(.*?)(?:,\s*then|\s+then|\s*;\s*then|\s*,\s*and\s+then|\s+and\s+then)\s+(.+)$/i);
+      if (thenMatch) {
+        conditionText = thenMatch[1].trim();
+        trailingNextActions = thenMatch[2].trim();
+      }
+
+      const parsedAction = parseTask(actionText, true);
+      if (parsedAction && Array.isArray(parsedAction.steps) && parsedAction.steps.length > 0 && parsedAction.steps[0].type !== "NONE") {
+        const condSteps = parsedAction.steps.map((st) => ({
+          ...st,
+          isConditional: true,
+          conditional: true,
+          condition: conditionText
+        }));
+
+        if (trailingNextActions) {
+          const nextRes = parseTask(trailingNextActions, true);
+          if (nextRes && Array.isArray(nextRes.steps) && nextRes.steps.length > 0 && nextRes.steps[0].type !== "NONE") {
+            condSteps.push(...nextRes.steps);
+          }
+        }
+
+        return condSteps;
+      }
+    }
+
+    return null;
+  }
+
+  /**
    * Section 3b: Recognizes platform-targeted search workflows:
    * e.g. "Search Gmail for emails about SIH." ->
    * STEP 1: FILL -> Search mail (value: "emails about SIH")
@@ -1094,16 +1842,18 @@
     const text = (rawTask || "").trim().replace(/[.!?]+$/, "");
     if (!text) return null;
 
-    // Pattern: "Search <Platform> for <query>"
-    const m = text.match(/^search\s+([a-zA-Z0-9_\-]+)\s+for\s+(.+)$/i);
+    // Pattern: "Search <Platform> for <query> [and open/click <target>]"
+    const m = text.match(/^search\s+(?:in\s+|on\s+)?([a-zA-Z0-9_\-\s]+?)\s+for\s+(.+?)(?:\s*(?:,\s*|\s+)(?:and\s+then|and|then)\s+(?:open|click|select|choose|visit|view)\s+(?:the\s+)?(.+))?$/i);
     if (m) {
       const platform = m[1].trim();
-      const query = cleanValue(m[2].trim());
+      const rawQuery = m[2].trim();
+      const postActionTarget = m[3] ? m[3].trim() : null;
+      const query = cleanValue(rawQuery);
       if (/^(?:the|a|an|all|my|this|that|in|on|at|for)$/i.test(platform)) return null;
 
       const pLower = platform.toLowerCase();
       let searchTarget = "search";
-      if (pLower === "gmail") {
+      if (pLower === "gmail" || pLower === "mail" || pLower === "search mail") {
         searchTarget = "Search mail";
       } else if (pLower === "youtube") {
         searchTarget = "search";
@@ -1111,25 +1861,154 @@
         searchTarget = "search";
       }
 
-      return [
+      const isGeneralSearch = searchTarget === "search";
+      const stepTarget = isGeneralSearch ? "PRIMARY_SEARCH_INPUT" : searchTarget;
+      const stepRole = isGeneralSearch ? "PRIMARY_SEARCH_INPUT" : "input";
+
+      const steps = [
         {
           type: "FILL",
           fieldHint: searchTarget,
-          semanticTarget: searchTarget,
-          expectedRole: "input",
-          role: "input",
+          target: stepTarget,
+          targetRole: stepRole,
+          expectedRole: stepRole,
+          role: stepRole,
+          semanticTarget: stepTarget,
+          isSearchIntent: true,
           value: query
         },
         {
           type: "SUBMIT",
           targetHint: searchTarget,
-          semanticTarget: searchTarget,
+          target: stepTarget,
+          semanticTarget: stepTarget,
           query: query
         }
       ];
+
+      if (postActionTarget) {
+        const isFirst = /\b(?:first|1st|top)\s+result\b/i.test(postActionTarget);
+        const isMostRelevant = /\b(?:most\s+relevant|relevant|best)\s+result\b/i.test(postActionTarget);
+        const concreteTarget = resolveConcreteSearchTarget(query, postActionTarget);
+        const concreteDomain = KNOWN_ENTITY_DOMAINS[query.toLowerCase()] || null;
+        steps.push({
+          type: "CLICK",
+          action: "CLICK",
+          targetHint: concreteTarget,
+          target: concreteTarget,
+          semanticTarget: concreteTarget,
+          query: query,
+          domain: concreteDomain,
+          isSearchResult: true,
+          isProductSelection: true,
+          isFirstResult: isFirst,
+          isMostRelevant: isMostRelevant,
+          ordinal: isFirst ? 1 : null,
+          role: "link",
+          expectedRole: "link",
+          isExplicitTarget: false
+        });
+      }
+
+      return steps;
     }
 
     return null;
+  }
+
+  // Known entity official domains for search result target resolution
+  const KNOWN_ENTITY_DOMAINS = {
+    isro: "isro.gov.in",
+    linkedin: "linkedin.com",
+    github: "github.com",
+    google: "google.com",
+    wikipedia: "wikipedia.org",
+    youtube: "youtube.com",
+    twitter: "twitter.com",
+    x: "x.com",
+    amazon: "amazon.in",
+    nasa: "nasa.gov",
+    apple: "apple.com",
+    microsoft: "microsoft.com",
+    facebook: "facebook.com",
+    instagram: "instagram.com",
+    reddit: "reddit.com"
+  };
+
+  /**
+   * Checks if a target string is an abstract search-result phrase that cannot be directly grounded.
+   * @param {string} target
+   * @returns {boolean}
+   */
+  function isAbstractTarget(target) {
+    if (!target) return true;
+    const t = target.trim().toLowerCase();
+    return /^(?:most\s+relevant\s+result|most\s+relavent\s+result|relevant\s+result|correct\s+result|appropriate\s+result|the\s+result|result|the\s+website|website|the\s+site|site|the\s+page|page|the\s+link|link|the\s+product|product|most\s+relevant\s+product|it|that|this|them|first\s+result|top\s+result)$/i.test(t);
+  }
+
+  /**
+   * Converts abstract search-result references into concrete, groundable targets.
+   * @param {string} query - The search query
+   * @param {string} [candidate] - Raw candidate phrase
+   * @param {Object} [entity] - Inferred entity
+   * @param {string} [intent] - Contextual intent
+   * @returns {string} Concrete, groundable target name
+   */
+  function resolveConcreteSearchTarget(query, candidate = "", entity = null, intent = null) {
+    const q = (query || "").trim();
+    const qLower = q.toLowerCase();
+    const candLower = (candidate || "").toLowerCase().trim();
+    const intentLower = (intent || "").toLowerCase().trim();
+
+    // 1. Profile intent (e.g. "open his LinkedIn profile", "open Sundar Pichai's profile")
+    if (candLower.includes("profile") || intentLower.includes("profile") || /\bprofile\b/i.test(candLower)) {
+      if (candLower.includes("linkedin") || /linkedin\b/i.test(candLower)) {
+        return `${q} LinkedIn profile`;
+      }
+      if (entity && entity.name) {
+        return entity.name;
+      }
+      return `${q} profile`;
+    }
+
+    // 2. Official website / site intent (e.g. "official website", "official ISRO website", "the official website")
+    const isOfficial = /official/i.test(candLower) || /official/i.test(intentLower);
+    const isWebsite = /\b(?:website|site|webpage|page|portal)\b/i.test(candLower) || /\b(?:website|site|webpage|page|portal)\b/i.test(intentLower);
+
+    if (isOfficial || isWebsite) {
+      if (qLower === "isro") {
+        return "official ISRO website (isro.gov.in)";
+      }
+      if (qLower === "linkedin") {
+        return "LinkedIn official website";
+      }
+      const knownDomain = KNOWN_ENTITY_DOMAINS[qLower];
+      if (knownDomain && isOfficial) {
+        return `official ${q} website (${knownDomain})`;
+      }
+      if (isOfficial) {
+        return `${q} official website`;
+      }
+      return `${q} website`;
+    }
+
+    // 3. Specific named result or explicit non-abstract target
+    if (candidate && !isAbstractTarget(candidate)) {
+      return candidate;
+    }
+
+    // 4. Fallback for abstract search result references
+    if (q) {
+      if (qLower === "isro") {
+        return "official ISRO website (isro.gov.in)";
+      }
+      if (qLower === "linkedin") {
+        return "LinkedIn official website";
+      }
+      return `${q} official website`;
+    }
+
+    return candidate || "search result";
   }
 
   /**
@@ -1145,8 +2024,62 @@
     // Strip trailing ellipsis / dangling conjunctions: e.g. ", and ..." or ", and"
     text = text.replace(/(?:,\s*|\s+)(?:and\s+then|and|then|\.{3,}|…)+$/i, "").trim();
 
+    // 0a. Inverted search / open pattern: "Open [the] <TARGET> on/in [the] <WEBSITE>"
+    // e.g. "Open the GSLV-F17/EOS-05 mission on the ISRO website.", "Open Sundar Pichai's profile on LinkedIn."
+    const openOnSiteMatch = !/\b(?:and\s+then|and|then)\s+(?:search|find|open|click|select|fill|type)\b/i.test(text) &&
+      text.match(/^(?:open|find|locate|search\s+for|view)\s+(?:the\s+)?(.+?)\s+(?:on|in|at)\s+(?:the\s+)?([a-zA-Z0-9_\-]+(?:\s+[a-zA-Z0-9_\-]+){0,2})(?:\s+website|\s+site)?$/i);
+    if (openOnSiteMatch) {
+      const rawTarget = openOnSiteMatch[1].trim();
+      const site = openOnSiteMatch[2].trim();
+      if (!/^(?:search\s*(?:box|input|field|bar|area)?)$/i.test(rawTarget)) {
+        const isKnownSiteOrPlatform = /\b(?:website|site|platform|portal|page)\b/i.test(openOnSiteMatch[0]) ||
+          /^(?:linkedin|youtube|amazon|google|wikipedia|github|twitter|isro|reddit|facebook|instagram)\b/i.test(site);
+        if (isKnownSiteOrPlatform) {
+        let query = rawTarget;
+        let targetEntity = null;
+        let targetIntent = null;
+        const possMatch = rawTarget.match(/^(.+?)['’]s\s+(profile|page|account|details)$/i);
+        if (possMatch) {
+          query = possMatch[1].trim();
+          targetIntent = possMatch[2].toLowerCase();
+          targetEntity = { type: targetIntent === "profile" ? "person" : "item", name: query };
+        }
+
+        const steps = [
+          {
+            type: "FILL",
+            fieldHint: "search",
+            value: query
+          },
+          {
+            type: "SUBMIT",
+            targetHint: "search",
+            query: query
+          },
+          {
+            type: "CLICK",
+            action: "OPEN",
+            semanticAction: "OPEN",
+            targetHint: rawTarget,
+            target: rawTarget,
+            semanticTarget: rawTarget,
+            query: query,
+            isProductSelection: true,
+            isExplicitTarget: !targetEntity,
+            explicitTarget: !targetEntity ? rawTarget : null,
+            targetEntity: targetEntity || null,
+            targetIntent: targetIntent || null,
+            semanticCategory: targetEntity ? targetEntity.type : "generic",
+            isSemantic: Boolean(targetEntity)
+          }
+        ];
+        return steps;
+      }
+    }
+  }
+
     // 0. Optional navigation prefix: e.g. "Open YouTube, search for...", "Go to Amazon and search for...", "Open LinkedIn, find Sundar Pichai..."
-    const navPrefixMatch = text.match(/^(?:open|go\s+to|navigate\s+to|launch|visit)\s+(?:the\s+)?((?:(?!\b(?:and|then|after\s+that|next|followed\s+by|also)\b)[a-zA-Z0-9_\-])+(?:\s+(?!\b(?:and|then|after\s+that|next|followed\s+by|also)\b)[a-zA-Z0-9_\-]+)*)\s*(?:,\s*|\s+)?(?:\b(?:and\s+then|and|then|after\s+that|next|followed\s+by|also)\b\s*)?(?=(?:search|find|look\s+for)\b)/i);
+    const navPrefixMatch = text.match(/^(?:open|go\s+to|navigate\s+to|launch|visit)\s+(?:the\s+)?((?:(?!\b(?:and|then|after\s+that|next|followed\s+by|also)\b)[a-zA-Z0-9_\-])+(?:\s+(?!\b(?:and|then|after\s+that|next|followed\s+by|also)\b)[a-zA-Z0-9_\-]+)*)\s*(?:[.,;]\s*|\s+)?(?:\b(?:and\s+then|and|then|after\s+that|next|followed\s+by|also)\b\s*)?(?=\b(?:search|find|look\s+for)\b)/i);
     let navTarget = null;
     let searchTaskText = text;
     if (navPrefixMatch) {
@@ -1164,10 +2097,17 @@
     }
     if (!query) return null;
 
+    // Guard: Explicit form-fill actions (e.g. "type hello in Search mail", "Find the Name field and fill it with Sankii") must not be hijacked by search workflows
+    if (/\b(?:and\s+)?(?:fill|enter|type|put|write)\s+(?:it\s+)?with\b/i.test(searchTaskText) ||
+        /\bfield\s+(?:and\s+)?fill\b/i.test(searchTaskText) ||
+        (/^(?:enter|type|put|write|fill|set)\b/i.test(searchTaskText) && !/\b(?:and\s+then|and|then)\s+(?:search|find)\b/i.test(searchTaskText))) {
+      return null;
+    }
+
     if (navTarget) {
       if (!/\b(?:search|find|look\s+for)\b/i.test(searchTaskText)) return null;
     } else {
-      if (!/\bsearch\b/i.test(searchTaskText)) return null;
+      if (!/^(?:search|find|locate|look\s+for|go\s+to\s+(?:the\s+)?search)\b/i.test(searchTaskText)) return null;
     }
 
     const hasSearchBoxPrefix = /^(?:find|locate|go\s+to|click)\s+(?:on\s+)?(?:the\s+)?(?:search\s+(?:box|input|field|bar|area)|search)(?:\s+(?:in|on|at|of)\s+[a-zA-Z0-9_\-]+)?\b/i.test(searchTaskText);
@@ -1207,7 +2147,20 @@
           (typeof semanticResolver !== "undefined" && semanticResolver && semanticResolver.isContextualReference && (semanticResolver.isContextualReference(candidate) || semanticResolver.isContextualReference("the " + candidate)))
         );
 
-        if (isContextual) {
+        const qLower = (query || "").toLowerCase().trim();
+        const candLower = candidate.toLowerCase().trim();
+        const isOfficialOrSite = /\b(?:official\s+)?(?:website|site)\b/i.test(candidate) || (qLower && candLower.includes(qLower) && /\b(?:website|site|portal)\b/i.test(candLower));
+        const isExternalProfileSearch = !navTarget && (candLower.includes("linkedin") || (candLower.includes("profile") && !/^(?:his|her|their|my)\s+profile$/i.test(candidate)));
+
+        if (isOfficialOrSite || isExternalProfileSearch) {
+          const concrete = resolveConcreteSearchTarget(query, candidate, null, isExternalProfileSearch ? "profile" : null);
+          productTarget = concrete;
+          hasProductOpen = true;
+          isExplicitTarget = false;
+          explicitTarget = null;
+          isMostRelevant = false;
+          actionVerb = "CLICK";
+        } else if (isContextual) {
           const cIntent = extractContextualIntent(candidate);
           const eType = inferEntityType(candidate, cIntent);
           targetEntity = {
@@ -1235,7 +2188,13 @@
         }
       } else if (/\bopen\s+(?:it|that|the\s+product|the\s+result|the\s+video|the\s+item|the\s+website|the\s+site|the\s+page|the\s+link)\b/i.test(searchTaskText)) {
         hasProductOpen = true;
-        productTarget = "most relevant product";
+        const isWeb = /\b(?:the\s+)?(?:website|site)\b/i.test(searchTaskText);
+        if (query && isWeb) {
+          productTarget = resolveConcreteSearchTarget(query, "website");
+          actionVerb = "CLICK";
+        } else {
+          productTarget = "most relevant product";
+        }
         isMostRelevant = false;
         isExplicitTarget = false;
       }
@@ -1294,6 +2253,12 @@
     steps.push({
       type: "FILL",
       fieldHint: "search",
+      target: "PRIMARY_SEARCH_INPUT",
+      targetRole: "PRIMARY_SEARCH_INPUT",
+      expectedRole: "PRIMARY_SEARCH_INPUT",
+      role: "PRIMARY_SEARCH_INPUT",
+      semanticTarget: "PRIMARY_SEARCH_INPUT",
+      isSearchIntent: true,
       value: query
     });
 
@@ -1301,6 +2266,8 @@
     steps.push({
       type: "SUBMIT",
       targetHint: "search",
+      target: "PRIMARY_SEARCH_INPUT",
+      semanticTarget: "PRIMARY_SEARCH_INPUT",
       query: query
     });
 
@@ -1311,14 +2278,18 @@
       const isFirstResult = (productTarget && productTarget.toLowerCase().includes("first result")) || (candidate && candidate.toLowerCase().includes("first result"));
       const finalOrdinal = isFirstResult ? 1 : (semanticDesc.ordinal !== undefined ? semanticDesc.ordinal : null);
       const finalTarget = targetEntity ? targetEntity.name : productTarget;
+      const concreteDomain = (query && KNOWN_ENTITY_DOMAINS[query.toLowerCase()]) || null;
       steps.push({
         type: "CLICK",
-        action: actionVerb || "OPEN",
+        action: actionVerb || "CLICK",
         targetHint: finalTarget,
         target: finalTarget,
         semanticTarget: finalTarget,
         query: query,
+        domain: concreteDomain,
+        isSearchResult: true,
         isProductSelection: true,
+        isFirstResult: isFirstResult,
         isExplicitTarget: isExplicitTarget,
         explicitTarget: explicitTarget || null,
         targetEntity: targetEntity || null,
@@ -1328,7 +2299,9 @@
         ranking: semanticDesc.ranking || null,
         ordinal: finalOrdinal,
         spatial: semanticDesc.spatial || null,
-        isSemantic: !!(targetEntity || semanticDesc.isSemantic || finalOrdinal !== null)
+        isSemantic: !!(targetEntity || semanticDesc.isSemantic || finalOrdinal !== null),
+        role: "link",
+        expectedRole: "link"
       });
     }
 
@@ -1397,10 +2370,22 @@
       return buildResultFromSteps(replySteps, executionConstraints);
     }
 
+    // 0c. Communication workflow: e.g. "Open LinkedIn, click Start a post and write ...", "search for X, click Message and write ..."
+    const commSteps = parseCommunicationWorkflow(taskWithoutControls, executionConstraints);
+    if (commSteps && commSteps.length > 0) {
+      return buildResultFromSteps(commSteps, executionConstraints);
+    }
+
+    // 0d. Standalone conditional instruction check: e.g. "If a language-selection page appears, click English."
+    const standaloneCondSteps = parseConditionalClause(taskWithoutControls, executionConstraints);
+    if (standaloneCondSteps && standaloneCondSteps.length > 0) {
+      return buildResultFromSteps(standaloneCondSteps, executionConstraints);
+    }
+
     // Section 3: Recognize generic search workflows & multi-stage workflow check:
     // If the task contains sequential workflow stages across search or interactive actions,
     // split at the result selection boundary and parse each stage.
-    const multiStageSplitPattern = /(?<=(?:open|click|select|view)\s+(?:on\s+)?(?:the\s+)?(?:(?:most\s+relevant|actual|first|top|selected|chosen|official|main|verified|primary)\s+)*(?:[a-zA-Z0-9_\-]+\s+)?(?:product|result|item|listing|video|movie|article|email|mail|message|song|track|stream|content|website|site|webpage|page|link|portal|entry|it|that|them)|(?:submit\s+search|submit))\s*(?:,\s*(?:then|and\s+then|and)?|\s+(?:then|and\s+then|and)|\s*;\s*(?:then)?|\.\s*|\s+after\s+opening\s+[^,;]+,?\s*)\s*(?=(?:(?:find|locate|go\s+to|click)\s+(?:on\s+)?(?:the\s+)?(?:[a-zA-Z0-9_\-]+\s+)?(?:search\s+(?:box|input|field|bar|area)|search)\b|search\b|compose\b|enter\b|type\b|fill\b|send\b|write\b|reply\b|draft\b))/i;
+    const multiStageSplitPattern = /(?<=(?:open|click|select|view)\s+(?:on\s+)?(?:the\s+)?(?:(?:most\s+relevant|actual|first|top|selected|chosen|official|main|verified|primary)\s+)*(?:[a-zA-Z0-9_\-]+\s+)?(?:product|result|item|listing|video|movie|article|email|mail|message|song|track|stream|content|website|site|webpage|page|link|portal|entry|it|that|them))\s*(?:,\s*(?:then|and\s+then|and)?|\s+(?:then|and\s+then)|\s*;\s*(?:then)?|\.\s*|\s+after\s+opening\s+[^,;]+,?\s*)\s*(?=(?:(?:find|locate|go\s+to|click|select|open|view)\b|search\b|compose\b|enter\b|type\b|fill\b|send\b|write\b|reply\b|draft\b|if\b|when\b|in\s+case\b))/i;
 
     let stageParts = taskWithoutControls.split(multiStageSplitPattern);
     if (stageParts.length <= 1) {
@@ -1423,7 +2408,13 @@
           const lastSt = stageWorkflow[stageWorkflow.length - 1];
           currentTaskEntity = extractEntityFromStep(lastSt) || currentTaskEntity;
         } else {
-          // Check if trimmedPart is a contextual reference clause (e.g. "Open his profile", "Open that email", "Open it")
+          const condPartSteps = parseConditionalClause(trimmedPart, executionConstraints);
+          if (condPartSteps && condPartSteps.length > 0) {
+            combinedSteps = combinedSteps.concat(condPartSteps);
+            const lastSt = condPartSteps[condPartSteps.length - 1];
+            currentTaskEntity = extractEntityFromStep(lastSt) || currentTaskEntity;
+          } else {
+            // Check if trimmedPart is a contextual reference clause (e.g. "Open his profile", "Open that email", "Open it")
           const isCtxRef = isContextualReference(trimmedPart) || /^(?:open|click|view|select|visit)\s+(?:his|her|their|its|this|that|the)\s+(?:profile|product|page|email|message|item|result|first\s+result|person)\b/i.test(trimmedPart) || /^(?:open|click|view)\s+(?:it|this|that|them)$/i.test(trimmedPart);
           if (isCtxRef && currentTaskEntity) {
             const cIntent = extractContextualIntent(trimmedPart);
@@ -1452,6 +2443,7 @@
           }
         }
       }
+    }
       if (allValid && combinedSteps.length > 0) {
         return buildResultFromSteps(combinedSteps, executionConstraints);
       }
@@ -1521,7 +2513,27 @@
       let allValid = true;
 
       for (const part of candidateSplit) {
-        const trimmedPart = part.trim();
+        let trimmedPart = part.trim();
+        const condMatch = trimmedPart.match(/^(?:Once|When|After|As\s+soon\s+as)\s+(?:the\s+)?([a-zA-Z0-9_\-\s]+?)\s+(?:is\s+loaded|loads|has\s+loaded|is\s+open(?:ed)?|opens|appears),\s*(.*)$/i);
+        let stepPrecondition = null;
+        if (condMatch) {
+          stepPrecondition = `${condMatch[1].trim()}_loaded`;
+          trimmedPart = condMatch[2].trim();
+        }
+        trimmedPart = trimmedPart.replace(/^(?:and\s+then|and|then|after\s+that|next|followed\s+by|also)\s+/i, "");
+
+        const pushStep = (...stList) => {
+          for (const st of stList) {
+            if (!st) continue;
+            if (stepPrecondition) {
+              st.precondition = stepPrecondition;
+              st.preconditions = (st.preconditions || []).concat([stepPrecondition]);
+              stepPrecondition = null;
+            }
+            parsedSeqSteps.push(st);
+          }
+        };
+
         if (isPronounOrReference(trimmedPart) || /^(?:click|press|tap|select|use)\s+(?:on\s+)?(?:it|this|that|them|that\s+button|this\s+button|that\s+link|this\s+link|the\s+above|above|the\s+field|that\s+field|this\s+field|the\s+button|button|the\s+link|link)$/i.test(trimmedPart)) {
           if (parsedSeqSteps.length > 0) {
             const lastStep = parsedSeqSteps[parsedSeqSteps.length - 1];
@@ -1534,7 +2546,7 @@
         // Check for "add it to the cart" / "add to cart"
         const isAddToCartClause = /^(?:add\s+(?:it\s+)?to\s+(?:the\s+)?cart|add\s+to\s+cart)$/i.test(trimmedPart);
         if (isAddToCartClause) {
-          parsedSeqSteps.push({
+          pushStep({
             type: "CLICK",
             action: "CLICK",
             targetHint: "add_to_cart",
@@ -1550,7 +2562,7 @@
         const isCtxRef = isContextualReference(trimmedPart) || /^(?:open|click|view|select|visit)\s+(?:his|her|their|its|this|that|the)\s+(?:profile|product|page|email|message|item|result|first\s+result|person)\b/i.test(trimmedPart) || /^(?:open|click|view)\s+(?:it|this|that|them)$/i.test(trimmedPart);
         if (isCtxRef && currentTaskEntity) {
           const cIntent = extractContextualIntent(trimmedPart);
-          parsedSeqSteps.push({
+          pushStep({
             type: "CLICK",
             action: "OPEN",
             targetHint: currentTaskEntity.name,
@@ -1566,18 +2578,18 @@
 
         const multiFillNoVal = parseMultiFieldNoValClause(trimmedPart);
         if (multiFillNoVal) {
-          parsedSeqSteps.push(...multiFillNoVal);
+          pushStep(...multiFillNoVal);
           continue;
         }
 
         const fill = parseFillClause(trimmedPart) || parseJuxtapositionFill(trimmedPart);
         if (fill) {
-          parsedSeqSteps.push(fill);
+          pushStep(fill);
           currentTaskEntity = extractEntityFromStep(fill) || currentTaskEntity;
         } else {
           const contextual = parseContextualClause(trimmedPart, currentContext);
           if (contextual) {
-            parsedSeqSteps.push(contextual);
+            pushStep(contextual);
             currentTaskEntity = extractEntityFromStep(contextual) || currentTaskEntity;
             const activeCtx = resolveActiveContainerContext(contextual);
             if (activeCtx) {
@@ -1586,7 +2598,7 @@
           } else {
             const subRes = parseTask(trimmedPart, true);
             if (subRes.intent !== "NONE" && Array.isArray(subRes.steps) && subRes.steps.length > 0 && subRes.steps[0].type !== "NONE") {
-              parsedSeqSteps.push(...subRes.steps);
+              pushStep(...subRes.steps);
               const last = subRes.steps[subRes.steps.length - 1];
               currentTaskEntity = extractEntityFromStep(last) || currentTaskEntity;
               const candCtx = resolveActiveContainerContext(last);
@@ -1601,14 +2613,16 @@
 
       if (allValid && parsedSeqSteps.length > 0) {
         // If a NAVIGATE step is followed by steps that use that step's target as hierarchical context,
+        // or targets an in-page UI container (compose, reply, message, post, comment),
         // then that step was clicking/opening a DOM container on the page.
         parsedSeqSteps.forEach((step, sIdx) => {
           if (step.type === "NAVIGATE" && (step.targetHint || step.target)) {
             const targetNorm = (step.targetHint || step.target).toLowerCase();
+            const isUiTarget = /^(?:compose|reply|message|comment)$/i.test(targetNorm);
             const hasContextualChild = parsedSeqSteps.slice(sIdx + 1).some(
               (nxt) => nxt.context && nxt.context.toLowerCase() === targetNorm
             );
-            if (hasContextualChild) {
+            if (isUiTarget || hasContextualChild) {
               step.type = "CLICK";
               step.action = "CLICK";
               delete step.url;
@@ -1616,7 +2630,7 @@
             }
           }
         });
-        return buildResultFromSteps(parsedSeqSteps);
+        return buildResultFromSteps(parsedSeqSteps, executionConstraints);
       }
     }
 
@@ -1670,6 +2684,13 @@
           legacyTarget: resolveLegacyClickTarget(clickTarget)
         }
       ]);
+    }
+
+    // Standalone single-clause composer fill guard:
+    // If the entire task matches a composer intent (e.g. "write a post saying ..."), do not let andSplit split on internal commas in the value
+    const singleComposerFill = parseFillClause(task);
+    if (singleComposerFill && (singleComposerFill.composerType || singleComposerFill.context)) {
+      return buildResultFromSteps([singleComposerFill], executionConstraints);
     }
 
     // 3. Multi-clause split on 'and' / ',' (e.g. "fill full name as sanketh and email address as sanketh@example.com")
@@ -1774,14 +2795,52 @@
           {
             type: "FILL",
             fieldHint: "search",
+            target: "PRIMARY_SEARCH_INPUT",
+            targetRole: "PRIMARY_SEARCH_INPUT",
+            expectedRole: "PRIMARY_SEARCH_INPUT",
+            role: "PRIMARY_SEARCH_INPUT",
+            semanticTarget: "PRIMARY_SEARCH_INPUT",
+            isSearchIntent: true,
             value: query
           },
           {
             type: "SUBMIT",
             targetHint: "search",
+            target: "PRIMARY_SEARCH_INPUT",
+            semanticTarget: "PRIMARY_SEARCH_INPUT",
             query: query
           }
         ]);
+      }
+    }
+
+    // 5c-2. Explicit AI / assistant interaction: e.g. "Ask Gemini about ISRO", "Chat with Gemini about ISRO", "Ask AI about ISRO"
+    const askAiMatch = task.match(/^(?:ask|chat\s+with|talk\s+to)\s+(?:the\s+)?([a-zA-Z0-9_\-\s]+?)\s+(?:about|regarding|for|to)\s+['"]?([^'"]+?)['"]?$/i) ||
+      task.match(/^(?:ask|chat\s+with|talk\s+to)\s+(?:the\s+)?(gemini|copilot|chatgpt|ai|assistant|ai\s+mode)\s+['"]?([^'"]+?)['"]?$/i);
+    if (askAiMatch) {
+      const assistant = cleanFieldHint(askAiMatch[1]);
+      const aiQuery = cleanValue(askAiMatch[2]);
+      if (assistant && aiQuery && !isPronounOrReference(assistant)) {
+        return buildResultFromSteps([
+          {
+            type: "FILL",
+            fieldHint: assistant,
+            target: assistant,
+            semanticTarget: assistant,
+            targetRole: "AI_ASSISTANT_INPUT",
+            expectedRole: "AI_ASSISTANT_INPUT",
+            role: "AI_ASSISTANT_INPUT",
+            isAiAssistantIntent: true,
+            value: aiQuery
+          },
+          {
+            type: "SUBMIT",
+            targetHint: assistant,
+            target: assistant,
+            semanticTarget: assistant,
+            query: aiQuery
+          }
+        ], executionConstraints);
       }
     }
 
@@ -1808,29 +2867,34 @@
       ]);
     }
 
-    // 6b. Open page / navigation / semantic item: "open YouTube", "open the cheapest product", "open the latest email"
-    const openMatch = task.match(/^(?:open|navigate\s+to|go\s+to)\s+(?:the\s+)?([a-zA-Z0-9_\-\s]+?)(?:\s+page|\s+link|\s+tab)?$/i);
+    // 6b. Open page / navigation / semantic item: "open YouTube", "open the cheapest product", "open the latest email", "open https://example.com"
+    const openMatch = task.match(/^(?:open|navigate\s+to|go\s+to)\s+(?:the\s+)?([a-zA-Z0-9_\-.:\/\s]+?)(?:\s+page|\s+link|\s+tab)?$/i);
     if (openMatch) {
       const LOCATION_SUFFIX_PATTERN = /\s+(?:on\s+(?:the\s+)?(?:screen|page|webpage|site)|on\s+screen|here|in\s+(?:the\s+)?page)$/i;
       const targetHint = openMatch[1].trim().replace(/\s+(?:and\s+then|and|then|after\s+that|next|followed\s+by|also)$/i, "").replace(LOCATION_SUFFIX_PATTERN, "").trim();
       if (isPronounOrReference(targetHint)) {
         return createNoneResult("Cannot resolve pronoun target '" + targetHint + "' without prior clickable context");
       }
-      const isUiContainer = /^(?:filters?|menu|dropdown|accordion|dialog|modal|panel|cart|popup|drawer|sidebar|section|tabs?|options?|settings?)$/i.test(targetHint.toLowerCase()) ||
-        /\b(?:section|panel|container|accordion|dropdown|filters?|modal|dialog|drawer|sidebar)\b/i.test(targetHint.toLowerCase());
+      let finalTargetHint = targetHint;
+      if (/^home\s+page$/i.test(finalTargetHint)) {
+        finalTargetHint = "Home";
+      }
+      const isUiContainer = /^(?:home|homepage|filters?|menu|dropdown|accordion|dialog|modal|panel|cart|popup|drawer|sidebar|section|tabs?|options?|settings?|feed|profile|notifications|messages|jobs|compose|reply|message|post|comment)$/i.test(finalTargetHint.toLowerCase()) ||
+        /\b(?:section|panel|container|accordion|dropdown|filters?|modal|dialog|drawer|sidebar)\b/i.test(finalTargetHint.toLowerCase()) ||
+        /\b(?:home\s+page|homepage|home\s+tab)\b/i.test(finalTargetHint.toLowerCase());
 
-      const navUrl = resolveNavigationUrl(targetHint);
-      const isSemantic = semanticResolver ? semanticResolver.isSemanticInstruction(targetHint) : false;
+      const navUrl = resolveNavigationUrl(finalTargetHint);
+      const isSemantic = semanticResolver ? semanticResolver.isSemanticInstruction(finalTargetHint) : false;
 
       if (!navUrl || isSemantic || isUiContainer) {
-        const desc = semanticResolver ? semanticResolver.extractSemanticDescriptor(targetHint) : {};
+        const desc = semanticResolver ? semanticResolver.extractSemanticDescriptor(finalTargetHint) : {};
         return buildResultFromSteps([
           {
             type: "CLICK",
             action: "CLICK",
-            targetHint: targetHint,
-            target: targetHint,
-            semanticTarget: targetHint,
+            targetHint: finalTargetHint,
+            target: finalTargetHint,
+            semanticTarget: finalTargetHint,
             semanticCategory: desc.category || null,
             ranking: desc.ranking || null,
             ordinal: desc.ordinal !== undefined ? desc.ordinal : null,
@@ -1923,6 +2987,40 @@
       ]);
     }
 
+    // 6e-1. Natural language send intent with message/email body: e.g. "send a message saying hello", "send an email saying hello", "send a message with thank you"
+    const sendWithBodyMatch = task.match(/^send\s+(?:a\s+|an\s+)?(?:new\s+)?(message|email|mail|note)\s+(?:saying|with|that\s+says|text|:)\s+['"]?([\s\S]+?)['"]?$/i);
+    if (sendWithBodyMatch) {
+      const noun = sendWithBodyMatch[1].toLowerCase();
+      const val = cleanValue(sendWithBodyMatch[2]);
+      if (val) {
+        const isEmail = noun === "email" || noun === "mail";
+        return buildResultFromSteps([
+          {
+            type: "FILL",
+            action: "FILL",
+            fieldHint: isEmail ? "body" : "message",
+            target: isEmail ? "active compose textbox" : "active message composer",
+            semanticTarget: isEmail ? "active compose textbox" : "active message composer",
+            targetRole: "contenteditable",
+            expectedRole: "contenteditable",
+            role: "contenteditable",
+            context: isEmail ? "compose_body" : "message_composer",
+            composerType: isEmail ? "email" : "message",
+            requestedIntent: `send a ${noun}`,
+            value: val
+          },
+          {
+            type: "CLICK",
+            action: "CLICK",
+            targetHint: "Send",
+            target: "Send",
+            semanticTarget: "Send",
+            legacyTarget: resolveLegacyClickTarget("send")
+          }
+        ], executionConstraints);
+      }
+    }
+
     // 6e. SEND intent: e.g. "send the email", "send email", "send message", "send"
     const sendMatch = task.match(/^send(?:\s+(?:the\s+)?(?:email|mail|message))?$/i);
     if (sendMatch) {
@@ -2009,6 +3107,98 @@
       return createNoneResult("No steps parsed", constraintsObj);
     }
 
+    // Contextual active composer resolution across steps
+    let activeComposerContext = null;
+    steps.forEach((step) => {
+      const stepTargetLower = String(step.targetHint || step.target || "").toLowerCase();
+      if (step.type === "CLICK" || step.type === "OPEN") {
+        if (/\b(?:message|new\s+message)\b/i.test(stepTargetLower)) {
+          activeComposerContext = "message";
+        } else if (/\breply\b/i.test(stepTargetLower)) {
+          activeComposerContext = "reply";
+        } else if (/\b(?:compose|new\s+email|email|mail)\b/i.test(stepTargetLower)) {
+          activeComposerContext = "email";
+        } else if (/\b(?:start\s+a\s+post|post)\b/i.test(stepTargetLower)) {
+          activeComposerContext = "post";
+        } else if (/\bcomment\b/i.test(stepTargetLower)) {
+          activeComposerContext = "comment";
+        }
+      } else if (step.type === "FILL") {
+        const curFieldHint = String(step.fieldHint || "").toLowerCase();
+        const curTargetLower = String(step.target || step.fieldHint || "").toLowerCase();
+        // Guard: Never override explicit form/email fields like recipient, to, subject, name, email, phone, etc.
+        const isExplicitField = /^(?:recipient|to|subject|name|email|phone|address|college|company|title)$/i.test(curFieldHint) ||
+          /^(?:recipient|to|subject|name|email|phone|address|college|company|title)$/i.test(curTargetLower);
+        if (isExplicitField) return;
+
+        // Guard: Never create or keep target = "write a message", "type a reply", etc.
+        const isLiteralIntentTarget = /^(?:write|type|enter|send|draft)\s+(?:a\s+|an\s+)?(message|reply|email|mail|post|comment)/i.test(curTargetLower);
+        const isGenericBody = /^(?:body|content|text|editor|input|message|reply|write|type)$/i.test(curTargetLower);
+        const isExistingActiveComposer = /^(?:active\s+(?:message\s+composer|post\s+composer|compose\s+textbox|reply\s+composer|comment\s+box))$/i.test(curTargetLower);
+
+        // Precedence: If activeComposerContext was explicitly set by a prior CLICK step (e.g. "Start a post"),
+        // that concrete active container context overrides conversational words like "write a message", "write", etc.
+        const compType = activeComposerContext ||
+          (isLiteralIntentTarget
+            ? curTargetLower.match(/^(?:write|type|enter|send|draft)\s+(?:a\s+|an\s+)?(message|reply|email|mail|post|comment)/i)[1].toLowerCase()
+            : step.composerType);
+
+        const isComposerCandidate = isLiteralIntentTarget || isGenericBody || isExistingActiveComposer || Boolean(step.composerType);
+
+        if (compType === "post" && isComposerCandidate) {
+          step.target = "active post composer";
+          step.semanticTarget = "active post composer";
+          step.fieldHint = "post composer";
+          step.composerType = "post";
+          step.context = "communication_composer";
+          step.targetRole = "contenteditable";
+          step.expectedRole = "contenteditable";
+          step.role = "contenteditable";
+          step.requestedIntent = "write a post";
+        } else if (compType === "message" && isComposerCandidate) {
+          step.target = "active message composer";
+          step.semanticTarget = "active message composer";
+          step.fieldHint = step.fieldHint || "message";
+          step.composerType = "message";
+          step.context = "communication_composer";
+          step.targetRole = "contenteditable";
+          step.expectedRole = "contenteditable";
+          step.role = "contenteditable";
+          step.requestedIntent = step.requestedIntent || "write a message";
+        } else if (compType === "reply" && isComposerCandidate) {
+          step.target = "active reply composer";
+          step.semanticTarget = "active reply composer";
+          step.fieldHint = step.fieldHint || "reply";
+          step.composerType = "reply";
+          step.context = "communication_composer";
+          step.targetRole = "contenteditable";
+          step.expectedRole = "contenteditable";
+          step.role = "contenteditable";
+          step.requestedIntent = step.requestedIntent || "write a reply";
+        } else if ((compType === "email" || compType === "mail") && isComposerCandidate) {
+          step.target = "active compose textbox";
+          step.semanticTarget = "active compose textbox";
+          step.fieldHint = step.fieldHint || "body";
+          step.composerType = "email";
+          step.context = "communication_composer";
+          step.targetRole = "contenteditable";
+          step.expectedRole = "contenteditable";
+          step.role = "contenteditable";
+          step.requestedIntent = step.requestedIntent || "write an email";
+        } else if (compType === "comment" && isComposerCandidate) {
+          step.target = "active comment box";
+          step.semanticTarget = "active comment box";
+          step.fieldHint = step.fieldHint || "comment";
+          step.composerType = "comment";
+          step.context = "communication_composer";
+          step.targetRole = "contenteditable";
+          step.expectedRole = "contenteditable";
+          step.role = "contenteditable";
+          step.requestedIntent = step.requestedIntent || "write a comment";
+        }
+      }
+    });
+
     const sanitizedPlan = [];
     const localValues = {};
     const goals = [];
@@ -2017,6 +3207,8 @@
     let fillStepIndex = 0;
     steps.forEach((step, idx) => {
       step.stepId = idx;
+      if (!step.action) step.action = step.type;
+      if (!step.target) step.target = step.targetHint || step.fieldHint || (step.type === "SCROLL" ? "PAGE" : "");
 
       // Group low-level action steps into user-facing subgoals
       if (step.type === "CLICK" && (step.targetHint === "search box" || step.legacyTarget === "SEARCH_INPUT")) {
@@ -2136,12 +3328,27 @@
         localValues["form_profile"] = step.profileSource || "form-profile.json";
         localValues["simultaneous"] = true;
       } else if (step.type === "FILL") {
+        const isSearchFill = step.targetRole === "PRIMARY_SEARCH_INPUT" ||
+          step.expectedRole === "PRIMARY_SEARCH_INPUT" ||
+          step.semanticTarget === "PRIMARY_SEARCH_INPUT" ||
+          step.target === "PRIMARY_SEARCH_INPUT" ||
+          step.fieldHint === "search";
+        const fillTarget = isSearchFill ? "PRIMARY_SEARCH_INPUT" : (step.target || step.semanticTarget || step.fieldHint);
+        const fillRole = isSearchFill ? "PRIMARY_SEARCH_INPUT" : (step.expectedRole || step.role || "input");
+
         sanitizedPlan.push({
           type: "FILL",
           fieldHint: step.fieldHint,
-          semanticTarget: step.semanticTarget || step.fieldHint,
-          expectedRole: step.expectedRole || step.role || "input",
-          role: step.role || step.expectedRole || "input",
+          target: fillTarget,
+          semanticTarget: fillTarget,
+          targetRole: fillRole,
+          expectedRole: fillRole,
+          role: fillRole,
+          isSearchIntent: isSearchFill,
+          isAiAssistantIntent: !!step.isAiAssistantIntent,
+          composerType: step.composerType || null,
+          requestedIntent: step.requestedIntent || null,
+          context: step.context || null,
           stepId: idx,
           goalId: step.goalId
         });
@@ -2151,10 +3358,19 @@
         localValues[`step_${idx}`] = step.value;
         fillStepIndex++;
         const normHint = (step.fieldHint || "").toLowerCase().trim();
+        if (step.fieldHint) {
+          localValues[step.fieldHint] = step.value;
+        }
         if (normHint) {
           localValues[normHint] = step.value;
           if (normHint === "body" || normHint.includes("message")) {
             localValues["message"] = step.value;
+            localValues["body"] = step.value;
+          } else if (normHint === "reply") {
+            localValues["reply"] = step.value;
+            localValues["body"] = step.value;
+          } else if (normHint.includes("post")) {
+            localValues["post"] = step.value;
             localValues["body"] = step.value;
           } else if (normHint === "recipient" || normHint === "to") {
             localValues["to"] = step.value;
@@ -2218,8 +3434,12 @@
           contentFilter: step.contentFilter || null,
           senderFilter: step.senderFilter || null,
           isSemantic: !!step.isSemantic,
-          expectedRole: step.expectedRole || step.role || "button",
-          role: step.role || step.expectedRole || "button",
+          isSearchResult: Boolean(step.isSearchResult || step.isProductSelection || step.semanticCategory === "result" || step.isFirstResult),
+          isFirstResult: !!step.isFirstResult,
+          isMostRelevant: !!step.isMostRelevant,
+          domain: step.domain || null,
+          expectedRole: step.expectedRole || step.role || ((step.isSearchResult || step.isProductSelection || step.semanticCategory === "result" || step.isFirstResult) ? "link" : "button"),
+          role: step.role || step.expectedRole || ((step.isSearchResult || step.isProductSelection || step.semanticCategory === "result" || step.isFirstResult) ? "link" : "button"),
           requiresApproval: !!step.requiresApproval,
           legacyTarget: step.legacyTarget || null,
           context: step.context || null,
@@ -2268,6 +3488,45 @@
 
     const cons = constraintsObj || currentActiveConstraints;
 
+    // Attach explicit approval flags to high-impact actions if user or policy requires it
+    if (cons) {
+      if (cons.requireApprovalBeforeSubmit) {
+        steps.forEach((st) => {
+          if (st.type === "SUBMIT" || (st.type === "CLICK" && (st.targetHint === "submit" || st.legacyTarget === "SUBMIT_BUTTON" || /submit/i.test(st.target || st.targetHint || "")))) {
+            st.requiresApproval = true;
+            st.risk = "HIGH";
+            st.riskLevel = "HIGH";
+          }
+        });
+      }
+      if (cons.requireApprovalBeforeSend) {
+        steps.forEach((st) => {
+          if (st.type === "CLICK" && (st.targetHint === "Send" || st.targetHint === "send" || st.legacyTarget === "SEND_BUTTON" || /send/i.test(st.target || st.targetHint || ""))) {
+            st.requiresApproval = true;
+            st.risk = "HIGH";
+            st.riskLevel = "HIGH";
+          }
+        });
+      }
+      if (cons.requireApprovalBeforeBuy) {
+        steps.forEach((st) => {
+          if (st.type === "CLICK" && (st.targetHint === "buy" || st.targetHint === "checkout" || st.legacyTarget === "BUY_BUTTON" || /buy|checkout|purchase/i.test(st.target || st.targetHint || ""))) {
+            st.requiresApproval = true;
+            st.risk = "HIGH";
+            st.riskLevel = "HIGH";
+          }
+        });
+      }
+    }
+
+    const approvalObj = {
+      required: !!(cons && (cons.requireApprovalBeforeSend || cons.requireApprovalBeforeSubmit || cons.requireApprovalBeforeBuy || cons.approvalRequirement)),
+      before_action: (cons && cons.requireApprovalBeforeSend) ? "SEND" :
+                     (cons && cons.requireApprovalBeforeSubmit) ? "SUBMIT" :
+                     (cons && cons.requireApprovalBeforeBuy) ? "PURCHASE" :
+                     (cons && cons.approvalRequirement) ? "HIGH_IMPACT_ACTION" : null
+    };
+
     return {
       intent: primaryIntent,
       steps: steps,
@@ -2275,10 +3534,13 @@
       sanitizedPlan: sanitizedPlan,
       localValues: localValues,
       isMultiStep: isMultiStep,
+      approval: approvalObj,
       constraints: (cons && cons.constraints) || [],
       stopCondition: (cons && cons.stopCondition) || null,
       approvalRequirement: (cons && cons.approvalRequirement) || null,
       requireApprovalBeforeSend: !!(cons && cons.requireApprovalBeforeSend),
+      requireApprovalBeforeSubmit: !!(cons && cons.requireApprovalBeforeSubmit),
+      requireApprovalBeforeBuy: !!(cons && cons.requireApprovalBeforeBuy),
       doNotSend: !!(cons && cons.doNotSend),
       doNotSubmit: !!(cons && cons.doNotSubmit),
       doNotBuy: !!(cons && cons.doNotBuy)
@@ -2300,18 +3562,26 @@
       sanitizedPlan: [{ type: "NONE" }],
       localValues: {},
       isMultiStep: false,
+      approval: { required: false, before_action: null },
       constraints: (cons && cons.constraints) || [],
       stopCondition: (cons && cons.stopCondition) || null,
       approvalRequirement: (cons && cons.approvalRequirement) || null,
       requireApprovalBeforeSend: !!(cons && cons.requireApprovalBeforeSend),
-      doNotSend: !!(cons && cons.doNotSend)
+      requireApprovalBeforeSubmit: !!(cons && cons.requireApprovalBeforeSubmit),
+      requireApprovalBeforeBuy: !!(cons && cons.requireApprovalBeforeBuy),
+      doNotSend: !!(cons && cons.doNotSend),
+      doNotSubmit: !!(cons && cons.doNotSubmit),
+      doNotBuy: !!(cons && cons.doNotBuy)
     };
   }
 
   return {
     parseTask,
+    parseCommunicationWorkflow,
+    parseReplyWorkflow,
     resolveNavigationUrl,
     parseContextualClause,
+    parseConditionalClause,
     extractOrdinal,
     normalizeRelation,
     extractTargetType,

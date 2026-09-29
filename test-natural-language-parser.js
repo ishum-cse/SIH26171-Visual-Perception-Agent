@@ -530,7 +530,102 @@ console.log("============================================================\n");
   console.log("[PASS] 9. All Action-Aware Clause Segmentation & Navigation regression tests PASSED");
 }
 
+// ---------------------------------------------------------------------
+// TEST 10: Natural Human Approval Instructions Separation (Cases A - F)
+// ---------------------------------------------------------------------
+console.log("\n--- TEST 10: Natural Human Approval Instructions Separation (Cases A - F) ---");
+
+// CASE A: Reply to this email with “Thank you sir!” and ask me before sending.
+{
+  const task = "Reply to this email with “Thank you sir!” and ask me before sending.";
+  const res = SIHTaskParser.parseTask(task);
+
+  assert.strictEqual(res.intent, "MULTI_STEP");
+  assert.strictEqual(res.steps[0].type, "CLICK");
+  assert.strictEqual(res.steps[0].targetHint, "Reply");
+
+  assert.strictEqual(res.steps[1].type, "FILL");
+  assert.strictEqual(res.steps[1].fieldHint, "Reply message body");
+  assert.strictEqual(res.steps[1].value, "Thank you sir!");
+
+  assert.strictEqual(res.steps[2].type, "CLICK");
+  assert.strictEqual(res.steps[2].targetHint, "Send");
+  assert.strictEqual(res.steps[2].requiresApproval, true);
+  assert.strictEqual(res.steps[2].risk, "HIGH");
+  assert.strictEqual(res.steps[2].riskLevel, "HIGH");
+
+  assert.strictEqual(res.requireApprovalBeforeSend, true);
+  assert.strictEqual(res.constraints.includes("REQUIRE_APPROVAL_BEFORE_SEND"), true);
+  assert.strictEqual(res.steps[1].value.includes("ask me before sending"), false);
+  assert.strictEqual(res.steps[1].value.includes("before sending"), false);
+  assert.strictEqual(res.steps[1].value.includes("approval"), false);
+  assert.strictEqual(res.steps[1].value.includes("confirmation"), false);
+  console.log("  [PASS] 10.A 'Reply to this email with “Thank you sir!” and ask me before sending.' -> value='Thank you sir!', requireApprovalBeforeSend=true");
+}
+
+// CASE B: Reply to this email with "Thank you sir!" and wait for my approval before sending.
+{
+  const task = 'Reply to this email with "Thank you sir!" and wait for my approval before sending.';
+  const res = SIHTaskParser.parseTask(task);
+
+  assert.strictEqual(res.steps[1].value, "Thank you sir!");
+  assert.strictEqual(res.requireApprovalBeforeSend, true);
+  assert.strictEqual(res.steps[2].requiresApproval, true);
+  assert.strictEqual(res.steps[1].value.includes("before sending"), false);
+  assert.strictEqual(res.steps[1].value.includes("approval"), false);
+  console.log("  [PASS] 10.B 'Reply to this email with \"Thank you sir!\" and wait for my approval before sending.' -> value='Thank you sir!', requireApprovalBeforeSend=true");
+}
+
+// CASE C: Reply to this email saying "Thank you sir!" and don't send it.
+{
+  const task = 'Reply to this email saying "Thank you sir!" and don\'t send it.';
+  const res = SIHTaskParser.parseTask(task);
+
+  assert.strictEqual(res.steps[1].value, "Thank you sir!");
+  assert.strictEqual(res.doNotSend, true);
+  assert.strictEqual(res.steps.length, 2, "Must not have Send step");
+  assert.strictEqual(res.steps.some(s => s.targetHint === "Send"), false);
+  console.log("  [PASS] 10.C 'Reply to this email saying \"Thank you sir!\" and don\'t send it.' -> value='Thank you sir!', doNotSend=true, no Send step");
+}
+
+// CASE D: Reply to this email with "Thank you sir!"
+{
+  const task = 'Reply to this email with "Thank you sir!"';
+  const res = SIHTaskParser.parseTask(task);
+
+  assert.strictEqual(res.steps[1].value, "Thank you sir!");
+  assert.strictEqual(res.requireApprovalBeforeSend, false);
+  assert.strictEqual(res.steps.length, 2, "Must not have Send step");
+  console.log("  [PASS] 10.D 'Reply to this email with \"Thank you sir!\"' -> value='Thank you sir!', requireApprovalBeforeSend=false");
+}
+
+// CASE E: Reply to this email with ‘Thank you sir!’ and ask me before sending.
+{
+  const task = "Reply to this email with ‘Thank you sir!’ and ask me before sending.";
+  const res = SIHTaskParser.parseTask(task);
+
+  assert.strictEqual(res.steps[1].value, "Thank you sir!");
+  assert.strictEqual(res.requireApprovalBeforeSend, true);
+  assert.strictEqual(res.steps[2].requiresApproval, true);
+  assert.strictEqual(res.steps[1].value.includes("before sending"), false);
+  console.log("  [PASS] 10.E 'Reply to this email with ‘Thank you sir!’ and ask me before sending.' -> value='Thank you sir!', requireApprovalBeforeSend=true");
+}
+
+// CASE F: Reply to this email with "Thank you sir!" and ask me before sending, then verify the reply.
+{
+  const task = 'Reply to this email with "Thank you sir!" and ask me before sending, then verify the reply.';
+  const res = SIHTaskParser.parseTask(task);
+
+  assert.strictEqual(res.steps[1].value, "Thank you sir!");
+  assert.strictEqual(res.requireApprovalBeforeSend, true);
+  assert.strictEqual(res.steps[2].requiresApproval, true);
+  assert.strictEqual(res.steps[1].value.includes("verify"), false);
+  assert.strictEqual(res.steps[1].value.includes("reply"), false);
+  assert.strictEqual(res.steps[1].value.includes("before sending"), false);
+  console.log("  [PASS] 10.F 'Reply to this email with \"Thank you sir!\" and ask me before sending, then verify the reply.' -> value='Thank you sir!', approval requirement preserved, no verification text in value");
+}
+
 console.log("\n============================================================");
-console.log("ALL NATURAL-LANGUAGE PARSER TESTS PASSED (9 / 9)");
+console.log("ALL NATURAL-LANGUAGE PARSER TESTS PASSED (10 / 10)");
 console.log("============================================================");
 

@@ -175,6 +175,7 @@
         break;
       }
 
+      case "OPEN":
       case "CLICK": {
         if (urlChanged || titleChanged) {
           status = VERIFICATION_STATUS.VERIFIED;
@@ -396,8 +397,11 @@
       return { valid: false, reason: "Target not found on current page" };
     }
 
-    // Usability check: reject disabled or read-only elements
-    if (targetElement.disabled || String(targetElement["aria-disabled"]).toLowerCase() === "true" || targetElement.readOnly) {
+    // Usability check: reject disabled controls. For read-only, only reject for text entry (FILL) if not a dynamic dropdown/combobox
+    const isFillAction = actionPayload.action === "FILL" || actionPayload.action === "FILL_FORM";
+    const isDynamicControl = ["combobox", "select"].includes((targetElement.type || "").toLowerCase()) ||
+      ["combobox", "select"].includes((targetElement.role || "").toLowerCase());
+    if (targetElement.disabled || String(targetElement["aria-disabled"]).toLowerCase() === "true" || (targetElement.readOnly && (!isDynamicControl || (isFillAction && targetElement.type !== "combobox" && targetElement.type !== "select")))) {
       return { valid: false, reason: "Target element is disabled or read-only" };
     }
 
@@ -409,6 +413,27 @@
       return { valid: false, reason: `Target grounding confidence too low (${score.toFixed(2)})` };
     }
 
+    // Helper to normalize bounding boxes [x, y, w, h] or { x, y, width, height }
+    function normalizeBounds(b) {
+      if (!b) return null;
+      if (Array.isArray(b) && b.length >= 4) {
+        return { x: b[0], y: b[1], width: b[2], height: b[3] };
+      }
+      if (typeof b.x === "number" && typeof b.y === "number") {
+        return { x: b.x, y: b.y, width: b.width || 0, height: b.height || 0 };
+      }
+      return null;
+    }
+
+    // Helper to normalize URLs
+    function normalizeUrl(u) {
+      if (!u) return "";
+      return String(u).trim().toLowerCase()
+        .replace(/^https?:\/\//i, "")
+        .replace(/^www\./i, "")
+        .replace(/\/+$/, "");
+    }
+
     // Ambiguity check: if multiple candidates share the exact same normalized label and type
     const targetLabel = (targetElement.label || actionPayload.targetLabel || actionPayload.target || "").trim().toLowerCase();
     const targetType = (targetElement.type || actionPayload.targetType || "").trim().toLowerCase();
@@ -416,13 +441,52 @@
     if (targetLabel && Array.isArray(allCandidates) && allCandidates.length > 1) {
       const exactMatches = allCandidates.filter((c) => {
         if (!c || c === targetElement) return false;
+        if (c.id && targetElement.id && c.id === targetElement.id) return false;
+        if (c.index !== undefined && targetElement.index !== undefined && c.index === targetElement.index) return false;
+        if (c.x !== undefined && targetElement.x !== undefined && c.x === targetElement.x && c.y === targetElement.y && c.width === targetElement.width && c.height === targetElement.height) return false;
+
+        // If URLs/hrefs are present and differ, elements are distinct links, not duplicate ambiguities
+        const cUrl = normalizeUrl(c.url || c.href);
+        const tUrl = normalizeUrl(targetElement.url || targetElement.href);
+        if (cUrl && tUrl && cUrl !== tUrl) return false;
+
         const cLabel = (c.label || "").trim().toLowerCase();
         const cType = (c.type || "").trim().toLowerCase();
         return cLabel === targetLabel && (!targetType || !cType || cType === targetType);
       });
 
       if (exactMatches.length > 0) {
-        return { valid: false, reason: "Target ambiguous: multiple identical elements found on page" };
+        // Preferred execution resolution: If grounding already produced a unique DOM index,
+        // unique URL/domain, or bounding-box correspondence, use that grounded identity instead of failing.
+        const rawIndex = actionPayload.targetIndex !== undefined
+          ? actionPayload.targetIndex
+          : (actionPayload.semanticTargetDescriptor ? actionPayload.semanticTargetDescriptor.originalIndex : undefined);
+        const payloadIndex = (rawIndex !== undefined && rawIndex !== null) ? parseInt(String(rawIndex).replace(/^#/, ""), 10) : undefined;
+        const targetElIndex = (targetElement.index !== undefined && targetElement.index !== null) ? parseInt(String(targetElement.index).replace(/^#/, ""), 10) : undefined;
+        const isIdentifiedByIndex = typeof payloadIndex === "number" && !isNaN(payloadIndex) && targetElIndex === payloadIndex;
+
+        const payloadUrl = actionPayload.url ||
+          actionPayload.semanticTargetDescriptor?.url ||
+          actionPayload.semanticTargetDescriptor?.href ||
+          actionPayload.domain;
+        const targetUrl = targetElement.url || targetElement.href;
+        const normPayloadUrl = normalizeUrl(payloadUrl);
+        const normTargetUrl = normalizeUrl(targetUrl);
+        const isIdentifiedByUrl = Boolean(normPayloadUrl && normTargetUrl && (
+          normTargetUrl === normPayloadUrl ||
+          normTargetUrl.includes(normPayloadUrl) ||
+          normPayloadUrl.includes(normTargetUrl)
+        ));
+
+        const payloadBounds = normalizeBounds(actionPayload.bounds || actionPayload.bbox || actionPayload.semanticTargetDescriptor?.bounds);
+        const targetBounds = normalizeBounds(targetElement.bounds || targetElement.bbox || (targetElement.x !== undefined ? { x: targetElement.x, y: targetElement.y, width: targetElement.width, height: targetElement.height } : null));
+        const isIdentifiedByBounds = Boolean(payloadBounds && targetBounds &&
+          Math.abs(targetBounds.x - payloadBounds.x) < 30 &&
+          Math.abs(targetBounds.y - payloadBounds.y) < 30);
+
+        if (!isIdentifiedByIndex && !isIdentifiedByUrl && !isIdentifiedByBounds) {
+          return { valid: false, reason: "Target ambiguous: multiple identical elements found on page" };
+        }
       }
     }
 
