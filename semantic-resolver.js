@@ -35,6 +35,57 @@
 
   const normalize = (s) => (s || "").trim().toLowerCase();
 
+  // M25: Canonical Semantic UI Roles
+  const SEMANTIC_ROLES = Object.freeze({
+    SEARCH_INPUT: "SEARCH_INPUT",
+    SEARCH_SUBMIT: "SEARCH_SUBMIT",
+    REPLY_BUTTON: "REPLY_BUTTON",
+    REPLY_COMPOSER: "REPLY_COMPOSER",
+    MESSAGE_BUTTON: "MESSAGE_BUTTON",
+    MESSAGE_COMPOSER: "MESSAGE_COMPOSER",
+    POST_ENTRY: "POST_ENTRY",
+    POST_COMPOSER: "POST_COMPOSER",
+    COMMENT_COMPOSER: "COMMENT_COMPOSER",
+    CHAT_COMPOSER: "CHAT_COMPOSER",
+    GENERIC_TEXT_EDITOR: "GENERIC_TEXT_EDITOR",
+    SUBMIT_BUTTON: "SUBMIT_BUTTON",
+    SEND_BUTTON: "SEND_BUTTON",
+    PUBLISH_BUTTON: "PUBLISH_BUTTON",
+    COMPOSE_BUTTON: "COMPOSE_BUTTON",
+    RECIPIENT_FIELD: "RECIPIENT_FIELD",
+    SUBJECT_FIELD: "SUBJECT_FIELD",
+    FORM_FIELD: "FORM_FIELD",
+    RESULT_LINK: "RESULT_LINK",
+    PROFILE_LINK: "PROFILE_LINK",
+    PRODUCT_LINK: "PRODUCT_LINK",
+    ADD_TO_CART_BUTTON: "ADD_TO_CART_BUTTON"
+  });
+
+  // M24: Supported Generic Semantic Intents
+  const SEMANTIC_INTENTS = Object.freeze({
+    SEARCH: "SEARCH",
+    NAVIGATE: "NAVIGATE",
+    OPEN_RESULT: "OPEN_RESULT",
+    OPEN_ITEM: "OPEN_ITEM",
+    REPLY_MESSAGE: "REPLY_MESSAGE",
+    COMPOSE_EMAIL: "COMPOSE_EMAIL",
+    SEND_MESSAGE: "SEND_MESSAGE",
+    CREATE_POST: "CREATE_POST",
+    COMMENT: "COMMENT",
+    FILL_FORM: "FILL_FORM",
+    SUBMIT_FORM: "SUBMIT_FORM",
+    SELECT: "SELECT",
+    CHECK: "CHECK",
+    UNCHECK: "UNCHECK",
+    TOGGLE: "TOGGLE",
+    DOWNLOAD: "DOWNLOAD",
+    ADD_TO_CART: "ADD_TO_CART",
+    OPEN_PROFILE: "OPEN_PROFILE",
+    OPEN_PRODUCT: "OPEN_PRODUCT",
+    SCROLL: "SCROLL",
+    CLICK_GENERIC: "CLICK_GENERIC"
+  });
+
   // Known item categories
   const ITEM_CATEGORIES = Object.freeze({
     PRODUCT: "product",
@@ -1433,6 +1484,336 @@
     };
   }
 
+  /**
+   * Identifies whether a candidate label is purely generic (e.g. 'input field', 'textarea').
+   * Generic labels must NEVER outrank task-specific semantic targets.
+   * @param {string} str
+   * @returns {boolean}
+   */
+  function isGenericInputLabel(str) {
+    if (!str) return false;
+    const s = String(str).toLowerCase().trim().replace(/[:*#_\-\/\\]+/g, " ");
+    return /^(?:input\s*field|field|textarea|textbox|text\s*box|input|text\s*field|text\s*area|form\s*field|control|element)$/i.test(s);
+  }
+
+  /**
+   * Detects the primary canonical semantic intent from user instruction and/or parsed steps.
+   * @param {string} taskText
+   * @param {Array<Object>} [steps]
+   * @returns {string} One of SEMANTIC_INTENTS
+   */
+  function detectSemanticIntent(taskText, steps) {
+    const t = String(taskText || "").toLowerCase().trim();
+    if (!t && (!steps || steps.length === 0)) return SEMANTIC_INTENTS.CLICK_GENERIC;
+
+    if (/\b(?:reply|draft\s+a\s+reply)\b/i.test(t)) return SEMANTIC_INTENTS.REPLY_MESSAGE;
+    if (/\b(?:start\s+a\s+post|make\s+a\s+post|create\s+a\s+post|write\s+a\s+post|share\s+a\s+post|post\s+saying)\b/i.test(t)) return SEMANTIC_INTENTS.CREATE_POST;
+    if (/\b(?:send\s+(?:a\s+|him\s+a\s+|her\s+a\s+|them\s+a\s+)?message|write\s+a\s+message)\b/i.test(t)) return SEMANTIC_INTENTS.SEND_MESSAGE;
+    if (/\b(?:comment|write\s+a\s+comment|leave\s+a\s+comment)\b/i.test(t)) return SEMANTIC_INTENTS.COMMENT;
+    if (/\b(?:compose|new\s+email|send\s+an\s+email|write\s+an\s+email)\b/i.test(t)) return SEMANTIC_INTENTS.COMPOSE_EMAIL;
+    if (/\b(?:add\s+to\s+cart|buy\s+now|checkout)\b/i.test(t)) return SEMANTIC_INTENTS.ADD_TO_CART;
+    if (/\b(?:download|save\s+file)\b/i.test(t)) return SEMANTIC_INTENTS.DOWNLOAD;
+    if (/\b(?:check\s+(?:the\s+)?box|check\s+the|enable\s+checkbox)\b/i.test(t)) return SEMANTIC_INTENTS.CHECK;
+    if (/\b(?:uncheck|disable\s+checkbox)\b/i.test(t)) return SEMANTIC_INTENTS.UNCHECK;
+    if (/\b(?:toggle|switch)\b/i.test(t)) return SEMANTIC_INTENTS.TOGGLE;
+    if (/\b(?:select|choose\s+option)\b/i.test(t)) return SEMANTIC_INTENTS.SELECT;
+    if (/\b(?:fill\s+(?:the\s+)?form|fill\s+details|fill\s+out|autofill|fill\s+[a-zA-Z0-9_\-]+\s+with|enter\s+[a-zA-Z0-9_\-]+\s+in)\b/i.test(t)) return SEMANTIC_INTENTS.FILL_FORM;
+    if (/\b(?:submit\s+(?:the\s+)?form|submit)\b/i.test(t)) return SEMANTIC_INTENTS.SUBMIT_FORM;
+    if (/\b(?:open|click|select|view|visit)\s+(?:on\s+)?(?:the\s+)?(?:(?:first|second|third|fourth|fifth|1st|2nd|3rd|top|last|most\s+relevant|relevant)\s+)?(?:search\s+result|result|results|product\s+result)\b/i.test(t)) return SEMANTIC_INTENTS.OPEN_RESULT;
+    if (/\b(?:search\s+for|search|find|look\s+for)\b/i.test(t)) return SEMANTIC_INTENTS.SEARCH;
+    if (/\b(?:open|view)\s+(?:profile|user)\b/i.test(t)) return SEMANTIC_INTENTS.OPEN_PROFILE;
+    if (/\b(?:open|view)\s+(?:product|item)\b/i.test(t)) return SEMANTIC_INTENTS.OPEN_PRODUCT;
+    if (/\b(?:scroll\s+down|scroll\s+up|scroll)\b/i.test(t)) return SEMANTIC_INTENTS.SCROLL;
+    if (/^(?:go\s+to|open|navigate\s+to|launch|visit)\s+https?:\/\//i.test(t) || /^(?:go\s+to|open|navigate\s+to)\s+[a-zA-Z0-9_\-]+\.(?:com|org|edu|gov|net|io)/i.test(t)) return SEMANTIC_INTENTS.NAVIGATE;
+
+    if (Array.isArray(steps) && steps.length > 0) {
+      if (steps.some(s => s.composerType === "reply" || s.semanticRole === "REPLY_COMPOSER" || s.targetRole === "REPLY_COMPOSER")) return SEMANTIC_INTENTS.REPLY_MESSAGE;
+      if (steps.some(s => s.composerType === "post" || s.semanticRole === "POST_COMPOSER" || s.targetRole === "POST_COMPOSER")) return SEMANTIC_INTENTS.CREATE_POST;
+      if (steps.some(s => s.composerType === "message" || s.semanticRole === "MESSAGE_COMPOSER" || s.targetRole === "MESSAGE_COMPOSER")) return SEMANTIC_INTENTS.SEND_MESSAGE;
+      if (steps.some(s => s.composerType === "comment" || s.semanticRole === "COMMENT_COMPOSER" || s.targetRole === "COMMENT_COMPOSER")) return SEMANTIC_INTENTS.COMMENT;
+      if (steps.some(s => s.isSearchIntent || s.targetRole === "SEARCH_INPUT" || s.semanticRole === "SEARCH_INPUT")) return SEMANTIC_INTENTS.SEARCH;
+      if (steps.some(s => s.type === "FILL_FORM" || s.type === "FILL" || s.action === "FILL")) return SEMANTIC_INTENTS.FILL_FORM;
+    }
+
+    return SEMANTIC_INTENTS.CLICK_GENERIC;
+  }
+
+  /**
+   * Infers the canonical semantic role for an individual action step.
+   * @param {Object} step
+   * @param {Object} [context]
+   * @returns {string|null} Canonical SEMANTIC_ROLES value
+   */
+  function inferSemanticRoleForStep(step, context) {
+    if (!step) return null;
+    const t = String(step.target || step.fieldHint || step.targetHint || "").toLowerCase().trim();
+    const action = String(step.action || step.type || "").toUpperCase();
+
+    if (step.semanticRole && SEMANTIC_ROLES[step.semanticRole]) {
+      return SEMANTIC_ROLES[step.semanticRole];
+    }
+    if (step.targetRole && SEMANTIC_ROLES[step.targetRole]) {
+      return SEMANTIC_ROLES[step.targetRole];
+    }
+    if (step.expectedRole && SEMANTIC_ROLES[step.expectedRole]) {
+      return SEMANTIC_ROLES[step.expectedRole];
+    }
+
+    if (action === "FILL") {
+      if (step.isSearchIntent || t === "primary_search_input" || t === "search" || t === "search mail" || t === "searchbox") {
+        return SEMANTIC_ROLES.SEARCH_INPUT;
+      }
+      if (step.composerType === "post" || t.includes("post composer") || t.includes("start a post")) {
+        return SEMANTIC_ROLES.POST_COMPOSER;
+      }
+      if (step.composerType === "message" || t.includes("message composer") || t === "message" || t === "communication message body") {
+        return SEMANTIC_ROLES.MESSAGE_COMPOSER;
+      }
+      if (step.composerType === "reply" || t.includes("reply composer") || t === "reply" || t.includes("reply message body")) {
+        return SEMANTIC_ROLES.REPLY_COMPOSER;
+      }
+      if (step.composerType === "comment" || t.includes("comment box") || t.includes("comment composer") || t === "comment") {
+        return SEMANTIC_ROLES.COMMENT_COMPOSER;
+      }
+      if (t === "recipient" || t === "to") return SEMANTIC_ROLES.RECIPIENT_FIELD;
+      if (t === "subject") return SEMANTIC_ROLES.SUBJECT_FIELD;
+      return SEMANTIC_ROLES.FORM_FIELD;
+    }
+
+    if (action === "CLICK" || action === "OPEN") {
+      if (t === "reply" || /\breply\b/i.test(t)) return SEMANTIC_ROLES.REPLY_BUTTON;
+      if (t === "start a post" || /\bstart\s+a\s+post\b/i.test(t)) return SEMANTIC_ROLES.POST_ENTRY;
+      if (t === "message" || /\bmessage\b/i.test(t)) return SEMANTIC_ROLES.MESSAGE_BUTTON;
+      if (t === "send" || /\bsend\b/i.test(t)) return SEMANTIC_ROLES.SEND_BUTTON;
+      if (t === "post" || t === "publish" || /\b(?:post|publish)\b/i.test(t)) return SEMANTIC_ROLES.PUBLISH_BUTTON;
+      if (t === "submit" || /\bsubmit\b/i.test(t)) return SEMANTIC_ROLES.SUBMIT_BUTTON;
+      if (t === "compose" || /\bcompose\b/i.test(t)) return SEMANTIC_ROLES.COMPOSE_BUTTON;
+      if (t === "add to cart" || /\badd\s+to\s+cart\b/i.test(t)) return SEMANTIC_ROLES.ADD_TO_CART_BUTTON;
+      if (step.isSearchResult || t.includes("search result") || t.includes("result")) return SEMANTIC_ROLES.RESULT_LINK;
+      if (step.targetEntity && step.targetEntity.type === "person") return SEMANTIC_ROLES.PROFILE_LINK;
+      if (step.targetEntity && step.targetEntity.type === "product") return SEMANTIC_ROLES.PRODUCT_LINK;
+    }
+
+    if (action === "SUBMIT") {
+      if (step.isSearchIntent || t === "primary_search_input" || t === "search") {
+        return SEMANTIC_ROLES.SEARCH_SUBMIT;
+      }
+      return SEMANTIC_ROLES.SUBMIT_BUTTON;
+    }
+
+    return null;
+  }
+
+  /**
+   * Generalized semantic composer candidate scoring.
+   * Works across arbitrary websites without site-specific checks.
+   * @param {Object} cand - Candidate element
+   * @param {string} requestedRole - Canonical role (POST_COMPOSER, MESSAGE_COMPOSER, etc.)
+   * @param {Object} [context]
+   * @returns {number} Score [0, 1]
+   */
+  function scoreComposerCandidate(cand, requestedRole, context = {}) {
+    if (!cand) return 0;
+    const role = requestedRole || cand.expectedRole || cand.targetRole;
+    if (!role) return 0;
+
+    const norm = (s) => (s || "").toLowerCase().replace(/[:*#_\-\/\\]+/g, " ").trim();
+    const candLabel = norm(cand.label);
+    const candAria = norm(cand.ariaLabel);
+    const candPlaceholder = norm(cand.placeholder || cand.dataPlaceholder);
+    const candType = (cand.type || "").toLowerCase();
+    const candRole = (cand.role || "").toLowerCase();
+    const isEditable = Boolean(cand.isContentEditable || cand.contenteditable === "true" || cand.contenteditable === true || cand.type === "contenteditable" || cand.tag === "textarea" || candType === "textarea");
+    const isTextCapable = isEditable || candType === "text" || candRole === "textbox" || cand.tag === "input" || cand.tag === "textarea";
+    if (!isTextCapable) return 0;
+
+    const isSearchControl = cand.semanticRole === "SEARCH_INPUT" || cand.semanticTag === "SEARCH_INPUT" || candType === "search" || /search/i.test(candLabel) || /search/i.test(candAria) || /search/i.test(candPlaceholder);
+    if (isSearchControl && role !== SEMANTIC_ROLES.SEARCH_INPUT) {
+      return 0.0;
+    }
+
+    if (/\b(?:profile\s*(?:picture|photo|image|avatar|pic)|user\s*avatar|avatar)\b/i.test(candLabel + " " + candAria + " " + (cand.className || ""))) {
+      return 0.0;
+    }
+
+    const inDialog = Boolean(cand.inDialog || cand.inModal || (context && (context.inDialog || context.inModal)));
+
+    if (role === SEMANTIC_ROLES.POST_COMPOSER) {
+      if (cand.semanticRole === "POST_COMPOSER" && inDialog) return 1.0;
+      const clues = /\b(?:post|talk\s+about|what\s+do\s+you\s+want\s+to\s+talk\s+about|share\s+your\s+thoughts|share|thoughts|write|create\s+a\s+post|start\s+a\s+post|text\s+editor)\b/i.test(candLabel + " " + candAria + " " + candPlaceholder);
+      if (isEditable && inDialog && clues) return 1.0;
+      if (isEditable && inDialog) return 0.98;
+      if (cand.semanticRole === "POST_COMPOSER") return 0.95;
+      if (isEditable && clues) return 0.95;
+      if (candType === "textarea" && inDialog) return 0.90;
+      if (isEditable) return 0.85;
+      if (candType === "textarea" && clues) return 0.80;
+      return 0.0;
+    }
+
+    if (role === SEMANTIC_ROLES.MESSAGE_COMPOSER) {
+      if (cand.semanticRole === "MESSAGE_COMPOSER") return 1.0;
+      const clues = /\b(?:message|chat|conversation|write\s+a\s+message|type\s+a\s+message|send\s+a\s+message)\b/i.test(candLabel + " " + candAria + " " + candPlaceholder);
+      if (isEditable && (inDialog || clues)) return 1.0;
+      if (candType === "textarea" && (inDialog || clues)) return 0.95;
+      if (isEditable) return 0.90;
+      if (candType === "textarea") return 0.85;
+      return 0.0;
+    }
+
+    if (role === SEMANTIC_ROLES.REPLY_COMPOSER) {
+      if (cand.semanticRole === "REPLY_COMPOSER") return 1.0;
+      const clues = /\b(?:reply|response|write\s+a\s+reply|type\s+a\s+reply|body|message\s+body)\b/i.test(candLabel + " " + candAria + " " + candPlaceholder);
+      if (isEditable && clues) return 1.0;
+      if (candType === "textarea" && clues) return 0.95;
+      if (isEditable) return 0.90;
+      if (candType === "textarea") return 0.85;
+      return 0.0;
+    }
+
+    if (role === SEMANTIC_ROLES.COMMENT_COMPOSER) {
+      if (cand.semanticRole === "COMMENT_COMPOSER") return 1.0;
+      const clues = /\b(?:comment|add\s+a\s+comment|write\s+a\s+comment|leave\s+a\s+comment)\b/i.test(candLabel + " " + candAria + " " + candPlaceholder);
+      if (isEditable && clues) return 1.0;
+      if (candType === "textarea" && clues) return 0.95;
+      if (isEditable) return 0.90;
+      if (candType === "textarea") return 0.85;
+      return 0.0;
+    }
+
+    if (role === SEMANTIC_ROLES.CHAT_COMPOSER) {
+      if (cand.semanticRole === "CHAT_COMPOSER") return 1.0;
+      const clues = /\b(?:chat|type\s+a\s+message|type\s+message|send\s+a\s+message|ask\s+anything|ask)\b/i.test(candLabel + " " + candAria + " " + candPlaceholder);
+      if (isEditable && (inDialog || clues)) return 1.0;
+      if (candType === "textarea" && (inDialog || clues)) return 0.95;
+      if (isEditable) return 0.90;
+      if (candType === "textarea") return 0.85;
+      return 0.0;
+    }
+
+    if (role === SEMANTIC_ROLES.GENERIC_TEXT_EDITOR) {
+      if (inDialog && isEditable) return 1.0;
+      if (inDialog && candType === "textarea") return 0.95;
+      if (isEditable) return 0.90;
+      if (candType === "textarea") return 0.85;
+      if (candType === "text" || candRole === "textbox") return 0.70;
+      return 0.0;
+    }
+
+    return 0.0;
+  }
+
+  /**
+   * Generic semantic editable-target resolver (Part 2, Part 4, Part 5).
+   * Resolves human intent / semantic role to the concrete current DOM/visual element
+   * across <textarea>, <input>, [contenteditable="true"], role="textbox", role="combobox".
+   * Considers action history, container/dialog hierarchy, accessibility, and visual clues.
+   *
+   * @param {string|Object} intent - Semantic intent, role name, or step object
+   * @param {Array<Object>|Object} perception - Visual elements snapshot from perception
+   * @param {Object} [context] - Action history: { previousAction, previousTarget, currentDialog, currentContainer }
+   * @returns {{ target: Object, score: number, role: string, candidateCount: number, method: string }|null}
+   */
+  function resolveEditableTarget(intent, perception, context = {}) {
+    let elements = [];
+    if (Array.isArray(perception)) {
+      elements = perception;
+    } else if (perception && Array.isArray(perception.elements)) {
+      elements = perception.elements;
+    } else if (perception && Array.isArray(perception.visualElements)) {
+      elements = perception.visualElements;
+    }
+    if (!elements || elements.length === 0) return null;
+
+    // 1. Determine target semantic role
+    let role = null;
+    let intentStr = "";
+    if (typeof intent === "string") {
+      intentStr = intent;
+      role = SEMANTIC_ROLES[intent] || null;
+    } else if (intent && typeof intent === "object") {
+      intentStr = String(intent.target || intent.semanticRole || intent.role || intent.action || "");
+      role = intent.semanticRole || intent.role || intent.expectedRole || SEMANTIC_ROLES[intent.target] || null;
+    }
+
+    if (!role) {
+      const lower = intentStr.toLowerCase();
+      if (/\b(?:search|searchbox|search\s+mail|primary_search_input)\b/i.test(lower)) {
+        role = SEMANTIC_ROLES.SEARCH_INPUT;
+      } else if (/\b(?:start\s+a\s+post|post\s+composer|post\s+body|create\s+a\s+post|share\s+a\s+post)\b/i.test(lower)) {
+        role = SEMANTIC_ROLES.POST_COMPOSER;
+      } else if (/\b(?:reply\s+composer|reply\s+message\s+body|reply\s+body|reply)\b/i.test(lower)) {
+        role = SEMANTIC_ROLES.REPLY_COMPOSER;
+      } else if (/\b(?:message\s+composer|message\s+body|message\s+box|send\s+message)\b/i.test(lower)) {
+        role = SEMANTIC_ROLES.MESSAGE_COMPOSER;
+      } else if (/\b(?:comment\s+composer|comment\s+box|comment)\b/i.test(lower)) {
+        role = SEMANTIC_ROLES.COMMENT_COMPOSER;
+      } else if (/\b(?:chat\s+composer|chat\s+box|chat)\b/i.test(lower)) {
+        role = SEMANTIC_ROLES.CHAT_COMPOSER;
+      }
+    }
+
+    // Contextual inference from Action History (Part 5)
+    if (!role && context) {
+      const prevAction = String(context.previousAction || "").toUpperCase();
+      const prevTarget = String(context.previousTarget || "").toLowerCase();
+      if (prevAction === "CLICK" || prevAction === "OPEN") {
+        if (/\b(?:start\s+a\s+post|post|share)\b/i.test(prevTarget) || context.currentDialog === "post") {
+          role = SEMANTIC_ROLES.POST_COMPOSER;
+        } else if (/\breply\b/i.test(prevTarget) || context.currentContainer === "reply") {
+          role = SEMANTIC_ROLES.REPLY_COMPOSER;
+        } else if (/\bmessage\b/i.test(prevTarget) || context.currentContainer === "message") {
+          role = SEMANTIC_ROLES.MESSAGE_COMPOSER;
+        }
+      }
+    }
+
+    if (!role) {
+      role = SEMANTIC_ROLES.GENERIC_TEXT_EDITOR;
+    }
+
+    // 2. Score candidates
+    const scored = [];
+    for (const el of elements) {
+      if (!el) continue;
+      const tag = (el.tagName || el.tag || "").toLowerCase();
+      const type = (el.type || "").toLowerCase();
+      const elRole = (el.role || "").toLowerCase();
+      const isContentEditable = Boolean(el.isContentEditable || el.contenteditable === "true" || el.contenteditable === true || type === "contenteditable");
+      const isTextCapable = isContentEditable || tag === "textarea" || type === "textarea" || tag === "input" || elRole === "textbox" || elRole === "combobox";
+
+      if (!isTextCapable) continue;
+
+      let score = 0;
+      if (role === SEMANTIC_ROLES.SEARCH_INPUT) {
+        if (el.semanticRole === "SEARCH_INPUT" || el.semanticTag === "SEARCH_INPUT") score = 1.0;
+        else if (type === "search") score = 0.95;
+        else if (/search/i.test((el.label || "") + " " + (el.ariaLabel || "") + " " + (el.placeholder || ""))) score = 0.90;
+        else if (elRole === "combobox" && /search/i.test((el.ariaLabel || "") + " " + (el.placeholder || ""))) score = 0.88;
+        else if (tag === "input" && (type === "text" || !type)) score = 0.50;
+      } else {
+        score = scoreComposerCandidate(el, role, context);
+      }
+
+      if (score > 0) {
+        scored.push({ element: el, score });
+      }
+    }
+
+    if (scored.length === 0) return null;
+
+    scored.sort((a, b) => b.score - a.score);
+    const best = scored[0];
+
+    return {
+      target: best.element,
+      score: best.score,
+      role: role,
+      candidateCount: scored.length,
+      method: "semantic+container+visual"
+    };
+  }
+
   return {
     resolveSemanticTarget,
     isSemanticInstruction,
@@ -1445,6 +1826,13 @@
     filterBySpatialRelation,
     isExcludedSearchPageControl,
     isSearchResultCandidate,
-    ITEM_CATEGORIES
+    ITEM_CATEGORIES,
+    SEMANTIC_ROLES,
+    SEMANTIC_INTENTS,
+    isGenericInputLabel,
+    detectSemanticIntent,
+    inferSemanticRoleForStep,
+    scoreComposerCandidate,
+    resolveEditableTarget
   };
 });

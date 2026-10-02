@@ -348,6 +348,87 @@ def _match_score(task_lower: str, label: str) -> float:
     seq_ratio = difflib.SequenceMatcher(None, t, l).ratio()
     return max(overlap_ratio, seq_ratio)
 
+def _score_editable_target(el: dict, intent_role: str, in_dialog: bool = False) -> float:
+    """
+    Generic semantic resolver for editable targets across websites.
+    Considers <textarea>, <input>, [contenteditable="true"], role="textbox", role="combobox".
+    Excludes global search controls from non-search composers.
+    """
+    if not el or not isinstance(el, dict):
+        return 0.0
+    if el.get("disabled") or str(el.get("aria-disabled", "")).lower() == "true":
+        return 0.0
+    el_type = str(el.get("type", "")).lower()
+    el_role = str(el.get("role", "")).lower()
+    el_tag = str(el.get("tag", "")).lower()
+    is_contenteditable = bool(el.get("isContentEditable") or el_type == "contenteditable" or el_role == "textbox")
+    is_textarea = el_type == "textarea" or el_tag == "textarea"
+    is_input = el_type in {"input", "text", "search", "textbox", "combobox"} or el_tag == "input"
+    if not (is_contenteditable or is_textarea or is_input):
+        return 0.0
+
+    lbl = _normalize(str(el.get("label", "")))
+    aria = _normalize(str(el.get("ariaLabel", "")))
+    ph = _normalize(str(el.get("placeholder", "") or el.get("dataPlaceholder", "")))
+    nearby = _normalize(str(el.get("nearbyText", "") or el.get("contextText", "")))
+    combined = f"{lbl} {aria} {ph} {nearby}"
+
+    role_norm = _normalize(intent_role)
+    is_search_intent = role_norm in {"search", "search_input", "primary_search_input"}
+    is_search = bool(el.get("semanticTag") == "SEARCH_INPUT" or el_type == "search" or re.search(r"\bsearch\b", combined))
+    if is_search and not is_search_intent:
+        return 0.0
+    if is_search_intent:
+        return _score_search_candidate(el)
+
+    # Exclude profile avatar
+    if re.search(r"\b(?:profile|avatar|photo|picture)\b", combined) and not any(k in role_norm for k in ["profile"]):
+        return 0.0
+
+    cand_in_dialog = bool(in_dialog or el.get("inDialog") or el.get("inModal") or "dialog" in combined or "modal" in combined)
+
+    if any(k in role_norm for k in ["post", "create_post", "post_composer"]):
+        clues = bool(re.search(r"\b(?:post|talk\s+about|share|thoughts|write|create\s+a\s+post|start\s+a\s+post|editor|mind)\b", combined))
+        if is_contenteditable and cand_in_dialog and clues: return 1.0
+        if is_contenteditable and cand_in_dialog: return 0.98
+        if is_textarea and cand_in_dialog: return 0.95
+        if is_contenteditable and clues: return 0.95
+        if is_contenteditable: return 0.88
+        if is_textarea: return 0.85
+        return 0.0
+
+    if any(k in role_norm for k in ["message", "send_message", "message_composer", "chat"]):
+        clues = bool(re.search(r"\b(?:message|chat|conversation|write|type|send)\b", combined))
+        if is_contenteditable and (cand_in_dialog or clues): return 1.0
+        if is_textarea and (cand_in_dialog or clues): return 0.95
+        if is_contenteditable: return 0.90
+        if is_textarea: return 0.85
+        return 0.0
+
+    if any(k in role_norm for k in ["reply", "reply_message", "reply_composer"]):
+        clues = bool(re.search(r"\b(?:reply|response|write|type|body)\b", combined))
+        if is_contenteditable and (cand_in_dialog or clues): return 1.0
+        if is_textarea and (cand_in_dialog or clues): return 0.95
+        if is_contenteditable: return 0.90
+        if is_textarea: return 0.85
+        return 0.0
+
+    if any(k in role_norm for k in ["comment", "comment_composer"]):
+        clues = bool(re.search(r"\b(?:comment|add\s+a\s+comment|leave\s+a\s+comment)\b", combined))
+        if is_contenteditable and clues: return 1.0
+        if is_textarea and clues: return 0.95
+        if is_contenteditable: return 0.90
+        if is_textarea: return 0.85
+        return 0.0
+
+    # Generic text editor
+    if is_contenteditable and cand_in_dialog: return 0.95
+    if is_textarea and cand_in_dialog: return 0.90
+    if is_contenteditable: return 0.85
+    if is_textarea: return 0.80
+    if is_input: return 0.70
+    return 0.0
+
 def extract_task_query_or_value(task: str) -> Optional[str]:
     """
     Extracts the user's intended search query or fill value directly from the user task.
@@ -587,6 +668,14 @@ class DemoAgentProvider:
 
                 if hint_lower:
                     is_search_field = hint_lower in ["search", "primary search input"] or (isinstance(item, dict) and item.get("targetRole") == "PRIMARY_SEARCH_INPUT")
+                    is_composer_hint = any(k in hint_lower for k in [
+                        "post composer", "active post composer", "post editor",
+                        "message composer", "active message composer", "message body",
+                        "reply composer", "reply message body", "active reply composer",
+                        "comment box", "comment composer", "active comment box", "chat box", "compose area"
+                    ]) or (isinstance(item, dict) and str(item.get("targetRole", "")).upper() in {
+                        "POST_COMPOSER", "MESSAGE_COMPOSER", "REPLY_COMPOSER", "COMMENT_COMPOSER"
+                    })
                     has_explicit_ai = bool(re.search(r"\b(?:gemini|copilot|chatgpt|ai\s+mode|ai\s+assistant|chat\s+with|ask\s+ai)\b", task_lower))
                     candidates = []
                     for i, el in enumerate(elements):
@@ -594,6 +683,18 @@ class DemoAgentProvider:
                             s_score = _score_search_candidate(el, task=task_lower, allow_explicit_ai=has_explicit_ai)
                             if s_score >= 0.35:
                                 candidates.append((s_score, i, el))
+                            continue
+                        if is_composer_hint:
+                            c_role = "POST_COMPOSER" if "post" in hint_lower else (
+                                "MESSAGE_COMPOSER" if any(k in hint_lower for k in ["message", "chat"]) else (
+                                    "REPLY_COMPOSER" if "reply" in hint_lower else (
+                                        "COMMENT_COMPOSER" if "comment" in hint_lower else "GENERIC_TEXT_EDITOR"
+                                    )
+                                )
+                            )
+                            c_score = _score_editable_target(el, c_role)
+                            if c_score >= 0.35:
+                                candidates.append((c_score, i, el))
                             continue
                         el_type = str(el.get("type", "")).lower()
                         if el_type not in FORM_FIELD_TYPES:
@@ -1314,7 +1415,7 @@ class GeminiAgentProvider:
             # First verify proposed_idx if valid
             if isinstance(proposed_idx, int) and 0 <= proposed_idx < len(elements):
                 cand_el = elements[proposed_idx]
-                if _is_excluded_search_control(cand_el):
+                if is_search and _is_excluded_search_control(cand_el):
                     best_idx = None
                 elif is_search and not has_explicit_ai and _is_ai_assistant_element(cand_el):
                     best_idx = None
@@ -1325,13 +1426,24 @@ class GeminiAgentProvider:
                         best_score = max(score, confidence)
                         best_el = cand_el
 
-            # Otherwise ground by label / target / synonyms / 5-tier search ranking
+            # Otherwise ground by label / target / synonyms / 5-tier search ranking / composer semantics
             if best_idx is None and (target_str or is_search or is_result_step):
+                is_composer_target = any(k in target_str.lower() for k in [
+                    "post composer", "active post composer", "post editor",
+                    "message composer", "active message composer", "message body",
+                    "reply composer", "reply message body", "active reply composer",
+                    "comment box", "comment composer", "active comment box", "chat box", "compose area"
+                ]) or any(k in task_lower for k in [
+                    "make a post", "start a post", "post saying", "write a post",
+                    "reply saying", "reply to this email", "write a reply",
+                    "message him", "message her", "send a message",
+                    "write a comment", "leave a comment"
+                ])
                 candidates = []
                 for i, el in enumerate(elements):
                     if el.get("disabled") or str(el.get("aria-disabled", "")).lower() == "true":
                         continue
-                    if _is_excluded_search_control(el):
+                    if is_search and _is_excluded_search_control(el):
                         continue
                     if is_search and not has_explicit_ai:
                         s_search = _score_search_candidate(el, task=task_lower, allow_explicit_ai=has_explicit_ai)
@@ -1350,7 +1462,20 @@ class GeminiAgentProvider:
                         if cand_s >= 0.40:
                             candidates.append((cand_s, i, el))
                         continue
-                    if action_name == "FILL" and str(el.get("type", "")).lower() not in {"input", "textarea", "select", "textbox", "checkbox", "radio"}:
+                    if action_name == "FILL" and is_composer_target:
+                        composer_role = "POST_COMPOSER" if (any(k in target_str.lower() for k in ["post"]) or any(k in task_lower for k in ["post"])) else (
+                            "MESSAGE_COMPOSER" if (any(k in target_str.lower() for k in ["message", "chat"]) or any(k in task_lower for k in ["message", "chat"])) else (
+                                "REPLY_COMPOSER" if (any(k in target_str.lower() for k in ["reply"]) or any(k in task_lower for k in ["reply"])) else (
+                                    "COMMENT_COMPOSER" if (any(k in target_str.lower() for k in ["comment"]) or any(k in task_lower for k in ["comment"])) else "GENERIC_TEXT_EDITOR"
+                                )
+                            )
+                        )
+                        s_best = _score_editable_target(el, composer_role)
+                        if s_best >= 0.35:
+                            candidates.append((s_best, i, el))
+                        continue
+                    el_type_str = str(el.get("type", "")).lower()
+                    if action_name == "FILL" and el_type_str not in {"input", "textarea", "select", "textbox", "checkbox", "radio", "contenteditable"} and not el.get("isContentEditable"):
                         continue
                     s_label = _match_score(target_str, str(el.get("label", "")))
                     s_ph = _match_score(target_str, str(el.get("placeholder", ""))) if el.get("placeholder") else 0.0

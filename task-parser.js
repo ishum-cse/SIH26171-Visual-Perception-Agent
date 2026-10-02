@@ -398,7 +398,7 @@
         const prep = enterInMatch[2].toLowerCase();
         const rawTarget = enterInMatch[3].trim();
         const hasExplicitControlWord = /(?:\s+field|\s+input|\s+box|\s+area|\s+textbox|\s+bar|\s+composer|\s+editor)$/i.test(enterInMatch[0]);
-        const isKnownField = /^(?:search|email|phone|mobile|password|username|name|full\s+name|subject|recipient|address|message|comment|notes?)$/i.test(cleanFieldHint(rawTarget));
+        const isKnownField = /^(?:search|email|phone|mobile|password|username|name|full\s+name|subject|recipient|address|message|comment|notes?|post|review)$/i.test(cleanFieldHint(rawTarget));
 
         // Prepositions 'in' and 'into' are unequivocal locative containers (e.g. "in Search mail", "in From", "into password").
         // Only prepositions 'for' and 'to' need strict control word / known field guards to prevent
@@ -409,7 +409,72 @@
         if (isValidFieldTarget) {
           const val = cleanValue(enterInMatch[1]);
           const field = cleanFieldHint(rawTarget);
-          if (val && field && !isPronounOrReference(field) && !/^(?:the|a|an|to|it|that|this)$/i.test(val)) {
+          const hasVerb = /^(?:enter|type|put|write)\b/i.test(text);
+          const isSingleArticle = /^(?:the|a|an|to)$/i.test(val);
+          const isPronounWithoutVerb = !hasVerb && /^(?:it|that|this)$/i.test(val);
+          if (val && field && !isPronounOrReference(field) && !isSingleArticle && !isPronounWithoutVerb) {
+            const lowerField = field.toLowerCase();
+            if (/message/i.test(lowerField)) {
+              return {
+                type: "FILL",
+                action: "FILL",
+                fieldHint: "message",
+                target: "active message composer",
+                semanticTarget: "active message composer",
+                targetRole: "contenteditable",
+                expectedRole: "contenteditable",
+                role: "contenteditable",
+                semanticRole: "MESSAGE_COMPOSER",
+                composerType: "message",
+                context: "communication_composer",
+                value: val
+              };
+            } else if (/comment/i.test(lowerField)) {
+              return {
+                type: "FILL",
+                action: "FILL",
+                fieldHint: "comment",
+                target: "active comment box",
+                semanticTarget: "active comment box",
+                targetRole: "contenteditable",
+                expectedRole: "contenteditable",
+                role: "contenteditable",
+                semanticRole: "COMMENT_COMPOSER",
+                composerType: "comment",
+                context: "communication_composer",
+                value: val
+              };
+            } else if (/post/i.test(lowerField)) {
+              return {
+                type: "FILL",
+                action: "FILL",
+                fieldHint: "post composer",
+                target: "active post composer",
+                semanticTarget: "active post composer",
+                targetRole: "contenteditable",
+                expectedRole: "contenteditable",
+                role: "contenteditable",
+                semanticRole: "POST_COMPOSER",
+                composerType: "post",
+                context: "communication_composer",
+                value: val
+              };
+            } else if (/reply/i.test(lowerField)) {
+              return {
+                type: "FILL",
+                action: "FILL",
+                fieldHint: "reply",
+                target: "active reply composer",
+                semanticTarget: "active reply composer",
+                targetRole: "contenteditable",
+                expectedRole: "contenteditable",
+                role: "contenteditable",
+                semanticRole: "REPLY_COMPOSER",
+                composerType: "reply",
+                context: "communication_composer",
+                value: val
+              };
+            }
             return { type: "FILL", action: "FILL", fieldHint: field, target: field, value: val };
           }
         }
@@ -450,16 +515,106 @@
     if (writeColonMatch) {
       const val = cleanValue(writeColonMatch[1]);
       if (val && !/^(?:the|a|an|it|this|that)$/i.test(val)) {
-        return { type: "FILL", action: "FILL", fieldHint: "body", target: "body", value: val };
+        return {
+          type: "FILL",
+          action: "FILL",
+          fieldHint: "active text editor",
+          target: "active text editor",
+          semanticTarget: "active text editor",
+          targetRole: "contenteditable",
+          expectedRole: "contenteditable",
+          role: "contenteditable",
+          semanticRole: "GENERIC_TEXT_EDITOR",
+          context: "active_composer",
+          value: val
+        };
       }
     }
 
-    // Pattern 3: 'type/write <val>' (e.g. "type Hello" -> FILL body with value "Hello")
+    // Pattern 3: 'type/write <val>' (e.g. "type Hello" -> FILL active text editor with value "Hello")
     const typeValMatch = text.match(/^(?:type|write)\s+['"]?([^'"]+?)['"]?$/i);
     if (typeValMatch) {
-      const val = cleanValue(typeValMatch[1]);
+      const rawVal = typeValMatch[1].trim();
+      const compWordMatch = rawVal.match(/^(?:a\s+|an\s+|this\s+|the\s+)?(comment|review|post|message|reply|note)$/i);
+      if (compWordMatch) {
+        const noun = compWordMatch[1].toLowerCase();
+        if (noun === "comment") {
+          return {
+            type: "FILL",
+            action: "FILL",
+            fieldHint: "comment",
+            target: "active comment box",
+            semanticTarget: "active comment box",
+            targetRole: "contenteditable",
+            expectedRole: "contenteditable",
+            role: "contenteditable",
+            semanticRole: "COMMENT_COMPOSER",
+            composerType: "comment",
+            context: "communication_composer",
+            value: rawVal
+          };
+        } else if (noun === "review") {
+          return {
+            type: "FILL",
+            action: "FILL",
+            fieldHint: "review",
+            target: "active review editor",
+            semanticTarget: "active review editor",
+            targetRole: "contenteditable",
+            expectedRole: "contenteditable",
+            role: "contenteditable",
+            semanticRole: "GENERIC_TEXT_EDITOR",
+            composerType: "review",
+            context: "communication_composer",
+            value: rawVal
+          };
+        } else if (noun === "post") {
+          return {
+            type: "FILL",
+            action: "FILL",
+            fieldHint: "post composer",
+            target: "active post composer",
+            semanticTarget: "active post composer",
+            targetRole: "contenteditable",
+            expectedRole: "contenteditable",
+            role: "contenteditable",
+            semanticRole: "POST_COMPOSER",
+            composerType: "post",
+            context: "communication_composer",
+            value: rawVal
+          };
+        } else if (noun === "message") {
+          return {
+            type: "FILL",
+            action: "FILL",
+            fieldHint: "message",
+            target: "active message composer",
+            semanticTarget: "active message composer",
+            targetRole: "contenteditable",
+            expectedRole: "contenteditable",
+            role: "contenteditable",
+            semanticRole: "MESSAGE_COMPOSER",
+            composerType: "message",
+            context: "communication_composer",
+            value: rawVal
+          };
+        }
+      }
+      const val = cleanValue(rawVal);
       if (val && !/^(?:the|a|an|it|this|that)$/i.test(val)) {
-        return { type: "FILL", action: "FILL", fieldHint: "body", target: "body", value: val };
+        return {
+          type: "FILL",
+          action: "FILL",
+          fieldHint: "active text editor",
+          target: "active text editor",
+          semanticTarget: "active text editor",
+          targetRole: "contenteditable",
+          expectedRole: "contenteditable",
+          role: "contenteditable",
+          semanticRole: "GENERIC_TEXT_EDITOR",
+          context: "active_composer",
+          value: val
+        };
       }
     }
 
@@ -1327,19 +1482,24 @@
           type: "CLICK",
           targetHint: "Reply",
           target: "Reply",
-          expectedRole: "button",
+          expectedRole: "REPLY_BUTTON",
+          targetRole: "REPLY_BUTTON",
+          semanticRole: "REPLY_BUTTON",
           role: "button",
           semanticTarget: "Reply",
+          semanticIntent: "REPLY_MESSAGE",
           legacyTarget: null
         },
         {
           type: "FILL",
           fieldHint: "Reply message body",
-          expectedRole: "textarea/contenteditable",
+          expectedRole: "REPLY_COMPOSER",
           role: "textarea/contenteditable",
-          targetRole: "contenteditable",
+          targetRole: "REPLY_COMPOSER",
+          semanticRole: "REPLY_COMPOSER",
           target: "Reply message body",
           semanticTarget: "Reply message body",
+          semanticIntent: "REPLY_MESSAGE",
           context: "communication_composer",
           composerType: "reply",
           value: replyBody
@@ -1351,9 +1511,12 @@
           type: "CLICK",
           targetHint: "Send",
           target: "Send",
-          expectedRole: "button",
+          expectedRole: "SEND_BUTTON",
+          targetRole: "SEND_BUTTON",
+          semanticRole: "SEND_BUTTON",
           role: "button",
           semanticTarget: "Send",
+          semanticIntent: "REPLY_MESSAGE",
           requiresApproval: true,
           risk: "HIGH",
           riskLevel: "HIGH",
@@ -1438,17 +1601,21 @@
       let val = rawVal.trim();
       val = val.replace(/^(?:saying\s+|as\s+|with\s+|that\s+says\s+|the\s+message\s+(?:saying\s+|that\s+says\s+|as\s+|:\s*)?|message\s+(?:saying\s+|as\s+|:\s*)?|the\s+text\s+(?:saying\s+|as\s+|:\s*)?|text\s+(?:saying\s+|as\s+|:\s*)?|:\s*)/i, "").trim();
       
+      let isQuoted = false;
       // Isolate quoted text if user provided quotes, ignoring trailing approval/constraint clauses outside quotes
       const quoteMatch = val.match(/^["“'‘]([\s\S]*?)["”'’](?:\s*(?:[.,;]\s*|\s+)?(?:\b(?:and\s+then|and|then)\b\s*)?(?:(?:wait\s+for|ask\s+for|request|require)\s+(?:human\s+|my\s+|user\s+)?approval|don'?t\s+(?:post|send|publish)|do\s+not\s+(?:post|send|publish)|stop\s+before\s+(?:posting|sending|publishing)|wait\s+before\s+(?:posting|sending|publishing))[\s\S]*)?$/i);
       if (quoteMatch) {
         val = quoteMatch[1].trim();
+        isQuoted = true;
       } else {
         const doubleMatch = val.match(/^["“”]([\s\S]*?)["”]$/);
         const singleMatch = val.match(/^['‘’]([\s\S]*?)['’]$/);
         if (doubleMatch) {
           val = doubleMatch[1].trim();
+          isQuoted = true;
         } else if (singleMatch) {
           val = singleMatch[1].trim();
+          isQuoted = true;
         }
       }
       
@@ -1508,16 +1675,19 @@
           target: "Start a post",
           semanticTarget: "Start a post",
           semanticCategory: "button",
-          expectedRole: "button",
+          expectedRole: "POST_ENTRY",
+          targetRole: "POST_ENTRY",
+          semanticRole: "POST_ENTRY",
           role: "button",
+          semanticIntent: "CREATE_POST",
           expectedTransition: "post_composer_open"
         });
         steps.push({
           type: "FILL",
           action: "FILL",
           fieldHint: "post composer",
-          target: "LinkedIn post composer",
-          semanticTarget: "LinkedIn post composer",
+          target: "active post composer",
+          semanticTarget: "active post composer",
           expectedRole: "POST_COMPOSER",
           targetRole: "POST_COMPOSER",
           target_role: "POST_COMPOSER",
@@ -1525,6 +1695,7 @@
           role: "contenteditable",
           context: "communication_composer",
           composerType: "post",
+          semanticIntent: "CREATE_POST",
           expectedTransition: "composer_filled",
           value: postValue,
           requestedIntent: "write a post"
@@ -1536,13 +1707,16 @@
             targetHint: "Post",
             target: "Post",
             semanticTarget: "Post",
-            expectedRole: "button",
+            expectedRole: "PUBLISH_BUTTON",
+            targetRole: "PUBLISH_BUTTON",
+            semanticRole: "PUBLISH_BUTTON",
             role: "button",
+            semanticIntent: "CREATE_POST",
             requiresApproval: true,
             risk: "HIGH",
             riskLevel: "HIGH",
             expectedTransition: "post_published",
-            approvalReason: "LinkedIn post is prepared but not published",
+            approvalReason: "Post is prepared but not published",
             approvalAction: "WAIT_FOR_APPROVAL"
           });
         }
@@ -1666,6 +1840,94 @@
     }
 
     // ----------------------------------------------------
+    // WORKFLOW B-2: PROFILE + MESSAGE WORKFLOW
+    // ----------------------------------------------------
+    // e.g. "Open the person's profile, click Message, and send a message saying thank you."
+    // e.g. "Open profile, click Message and write Thank you"
+    const profileMsgPattern = /^(?:(?:open|navigate\s+to|go\s+to|launch|visit)\s+(?:the\s+)?([a-zA-Z0-9_\-]+)(?:\s+website|\s+site)?\s*(?:[.,;]\s*|\s+)?(?:\b(?:and\s+then|and|then)\b\s*)?)?(?:(?:open|view|visit|click(?:\s+on)?)\s+(?:the\s+)?(?:person'?s?\s+|user'?s?\s+)?profile)\s*(?:,\s*|\s+)(?:and\s+then\s+|and\s+|then\s+)?(?:(?:click|press|tap)\s+(?:on\s+)?(?:the\s+)?)?message(?:\s+button)?\s*(?:,\s*|\s+)?(?:\b(?:and\s+then|and|then)\b\s*)?(?:(?:write|type|enter|send)(?:\s+(?:a\s+)?(?:message|text))?(?:\s+(?:saying|as|with|that\s+says|:))?)\s*[:\s]*([\s\S]+)$/i;
+
+    const mProfileMsg = t.match(profileMsgPattern);
+    if (mProfileMsg) {
+      const navSite = mProfileMsg[1] ? mProfileMsg[1].trim() : null;
+      const rawMsg = mProfileMsg[2] ? mProfileMsg[2].trim() : "";
+      const messageValue = extractValue(rawMsg);
+      if (messageValue) {
+        const steps = [];
+        if (navSite) {
+          steps.push({
+            type: "NAVIGATE",
+            action: "NAVIGATE",
+            targetHint: navSite,
+            target: navSite,
+            url: resolveNavigationUrl(navSite),
+            isNavigation: true,
+            legacyTarget: null
+          });
+        }
+        steps.push({
+          type: "CLICK",
+          action: "CLICK",
+          targetHint: "person's profile",
+          target: "person's profile",
+          semanticTarget: "person's profile",
+          expectedRole: "PROFILE_LINK",
+          targetRole: "PROFILE_LINK",
+          semanticRole: "PROFILE_LINK",
+          role: "link",
+          semanticIntent: "SEND_MESSAGE",
+          expectedTransition: "profile_opened"
+        });
+        steps.push({
+          type: "CLICK",
+          action: "CLICK",
+          targetHint: "Message",
+          target: "Message",
+          semanticTarget: "Message",
+          expectedRole: "MESSAGE_BUTTON",
+          targetRole: "MESSAGE_BUTTON",
+          semanticRole: "MESSAGE_BUTTON",
+          role: "button",
+          semanticIntent: "SEND_MESSAGE",
+          expectedTransition: "message_composer_open"
+        });
+        steps.push({
+          type: "FILL",
+          action: "FILL",
+          fieldHint: "message",
+          target: "active message composer",
+          semanticTarget: "message composer",
+          expectedRole: "MESSAGE_COMPOSER",
+          targetRole: "MESSAGE_COMPOSER",
+          semanticRole: "MESSAGE_COMPOSER",
+          role: "contenteditable",
+          context: "communication_composer",
+          composerType: "message",
+          semanticIntent: "SEND_MESSAGE",
+          expectedTransition: "message_filled",
+          value: messageValue
+        });
+        if (!doNotSend) {
+          steps.push({
+            type: "CLICK",
+            action: "CLICK",
+            targetHint: "Send",
+            target: "Send",
+            semanticTarget: "Send",
+            expectedRole: "SEND_BUTTON",
+            targetRole: "SEND_BUTTON",
+            semanticRole: "SEND_BUTTON",
+            semanticIntent: "SEND_MESSAGE",
+            role: "button",
+            requiresApproval: true,
+            risk: "HIGH",
+            riskLevel: "HIGH"
+          });
+        }
+        return steps;
+      }
+    }
+
+    // ----------------------------------------------------
     // WORKFLOW C: DIRECT MESSAGE WORKFLOW
     // ----------------------------------------------------
     // e.g. "click Message and write Thank you"
@@ -1697,21 +1959,26 @@
           targetHint: "Message",
           target: "Message",
           semanticTarget: "Message",
-          expectedRole: "button",
+          expectedRole: "MESSAGE_BUTTON",
+          targetRole: "MESSAGE_BUTTON",
+          semanticRole: "MESSAGE_BUTTON",
           role: "button",
+          semanticIntent: "SEND_MESSAGE",
           expectedTransition: "message_composer_open"
         });
         steps.push({
           type: "FILL",
           action: "FILL",
           fieldHint: "message",
-          target: "communication message body",
-          semanticTarget: "communication message body",
-          expectedRole: "contenteditable",
-          targetRole: "contenteditable",
+          target: "message composer",
+          semanticTarget: "message composer",
+          expectedRole: "MESSAGE_COMPOSER",
+          targetRole: "MESSAGE_COMPOSER",
+          semanticRole: "MESSAGE_COMPOSER",
           role: "contenteditable",
           context: "communication_composer",
           composerType: "message",
+          semanticIntent: "SEND_MESSAGE",
           expectedTransition: "message_filled",
           value: messageValue
         });
@@ -1722,8 +1989,135 @@
             targetHint: "Send",
             target: "Send",
             semanticTarget: "Send",
-            expectedRole: "button",
+            expectedRole: "SEND_BUTTON",
+            targetRole: "SEND_BUTTON",
+            semanticRole: "SEND_BUTTON",
+            semanticIntent: "SEND_MESSAGE",
             role: "button",
+            requiresApproval: true,
+            risk: "HIGH",
+            riskLevel: "HIGH"
+          });
+        }
+        return steps;
+      }
+    }
+
+    // ----------------------------------------------------
+    // WORKFLOW C-2: DIRECT SEND MESSAGE WORKFLOW WITH RECIPIENT
+    // ----------------------------------------------------
+    // e.g. "Send him a message saying hello"
+    // e.g. "Open LinkedIn and send her a message saying thanks"
+    // e.g. "Message him saying thank you"
+    const directSendMsgPattern = /^(?:(?:open|navigate\s+to|go\s+to|launch|visit)\s+(?:the\s+)?([a-zA-Z0-9_\-]+)(?:\s+website|\s+site)?\s*(?:[.,;]\s*|\s+)?(?:\b(?:and\s+then|and|then)\b\s*)?)?(?:(?:send|draft|prepare|write)\s+(?:(him|her|them|the\s+user|someone)\s+)(?:a\s+)?message|message\s+(him|her|them|the\s+user|someone))\s*(?:saying|with|that\s+says|as|:)\s*[:\s]*([\s\S]+)$/i;
+    const mDirectSendMsg = t.match(directSendMsgPattern);
+    if (mDirectSendMsg) {
+      const navSite = mDirectSendMsg[1] ? mDirectSendMsg[1].trim() : null;
+      const rawMsg = mDirectSendMsg[4] || mDirectSendMsg[3] || mDirectSendMsg[2] || "";
+      const messageValue = extractValue(rawMsg);
+      if (messageValue) {
+        const steps = [];
+        if (navSite) {
+          steps.push({
+            type: "NAVIGATE",
+            action: "NAVIGATE",
+            targetHint: navSite,
+            target: navSite,
+            url: resolveNavigationUrl(navSite),
+            isNavigation: true,
+            legacyTarget: null
+          });
+        }
+        steps.push({
+          type: "CLICK",
+          action: "CLICK",
+          targetHint: "Message",
+          target: "Message",
+          semanticTarget: "Message",
+          expectedRole: "MESSAGE_BUTTON",
+          targetRole: "MESSAGE_BUTTON",
+          semanticRole: "MESSAGE_BUTTON",
+          role: "button",
+          semanticIntent: "SEND_MESSAGE",
+          expectedTransition: "message_composer_open"
+        });
+        steps.push({
+          type: "FILL",
+          action: "FILL",
+          fieldHint: "message",
+          target: "message composer",
+          semanticTarget: "message composer",
+          expectedRole: "MESSAGE_COMPOSER",
+          targetRole: "MESSAGE_COMPOSER",
+          semanticRole: "MESSAGE_COMPOSER",
+          role: "contenteditable",
+          context: "communication_composer",
+          composerType: "message",
+          semanticIntent: "SEND_MESSAGE",
+          expectedTransition: "message_filled",
+          value: messageValue
+        });
+        if (!doNotSend) {
+          steps.push({
+            type: "CLICK",
+            action: "CLICK",
+            targetHint: "Send",
+            target: "Send",
+            semanticTarget: "Send",
+            expectedRole: "SEND_BUTTON",
+            targetRole: "SEND_BUTTON",
+            semanticRole: "SEND_BUTTON",
+            semanticIntent: "SEND_MESSAGE",
+            role: "button",
+            requiresApproval: true,
+            risk: "HIGH",
+            riskLevel: "HIGH"
+          });
+        }
+        return steps;
+      }
+    }
+
+    // ----------------------------------------------------
+    // WORKFLOW D: COMMENT WORKFLOW
+    // ----------------------------------------------------
+    // e.g. "Write a comment saying nice post"
+    // e.g. "Leave a comment saying great article"
+    const commentPattern = /^(?:(?:write|leave|post|make)\s+(?:a\s+)?comment|comment)\s*(?:saying|with|that\s+says|as|:)\s*[:\s]*([\s\S]+)$/i;
+    const mComment = t.match(commentPattern);
+    if (mComment) {
+      const rawVal = mComment[1] ? mComment[1].trim() : "";
+      const commentValue = extractValue(rawVal);
+      if (commentValue) {
+        const steps = [
+          {
+            type: "FILL",
+            action: "FILL",
+            fieldHint: "comment",
+            target: "active comment box",
+            semanticTarget: "active comment box",
+            expectedRole: "COMMENT_COMPOSER",
+            targetRole: "COMMENT_COMPOSER",
+            semanticRole: "COMMENT_COMPOSER",
+            role: "contenteditable",
+            context: "communication_composer",
+            composerType: "comment",
+            semanticIntent: "COMMENT",
+            value: commentValue
+          }
+        ];
+        if (!doNotSend) {
+          steps.push({
+            type: "CLICK",
+            action: "CLICK",
+            targetHint: "Post comment",
+            target: "Post comment",
+            semanticTarget: "Post comment",
+            expectedRole: "PUBLISH_BUTTON",
+            targetRole: "PUBLISH_BUTTON",
+            semanticRole: "PUBLISH_BUTTON",
+            role: "button",
+            semanticIntent: "COMMENT",
             requiresApproval: true,
             risk: "HIGH",
             riskLevel: "HIGH"
@@ -2078,6 +2472,12 @@
     }
   }
 
+    // Guard: Direct open/click on search result (e.g. "Open the first search result", "Click the first result")
+    // is a single-step result selection, NOT a search workflow!
+    if (/^(?:open|click|view|select|visit|choose|pick)\s+(?:on\s+)?(?:the\s+)?(?:(?:first|second|third|fourth|fifth|1st|2nd|3rd|top|last|most\s+relevant|relevant)\s+)?(?:search\s+result|search\s+results|result|results|product\s+result)\b/i.test(text.trim())) {
+      return null;
+    }
+
     // 0. Optional navigation prefix: e.g. "Open YouTube, search for...", "Go to Amazon and search for...", "Open LinkedIn, find Sundar Pichai..."
     const navPrefixMatch = text.match(/^(?:open|go\s+to|navigate\s+to|launch|visit)\s+(?:the\s+)?((?:(?!\b(?:and|then|after\s+that|next|followed\s+by|also)\b)[a-zA-Z0-9_\-])+(?:\s+(?!\b(?:and|then|after\s+that|next|followed\s+by|also)\b)[a-zA-Z0-9_\-]+)*)\s*(?:[.,;]\s*|\s+)?(?:\b(?:and\s+then|and|then|after\s+that|next|followed\s+by|also)\b\s*)?(?=\b(?:search|find|look\s+for)\b)/i);
     let navTarget = null;
@@ -2319,6 +2719,7 @@
   }
 
   let currentActiveConstraints = null;
+  let currentActiveTaskText = "";
 
   /**
    * Parses free-text user task into structured local intent.
@@ -2338,6 +2739,12 @@
       /(?:,\s*|\s+)(?:and\s+)?(?:then\s+)?(?:(?:verify|confirm|ensure)(?:\s+(?:that|if|whether))?|check\s+(?:that|if|whether))(?:\s+.*)?$/i,
       ""
     );
+
+    if (!isSubCall) {
+      currentActiveTaskText = cleanRawTask;
+    } else if (!currentActiveTaskText) {
+      currentActiveTaskText = cleanRawTask;
+    }
 
     // CRITICAL FIX: Extract user execution constraints and stop conditions FIRST
     let executionConstraints;
@@ -3001,12 +3408,15 @@
             fieldHint: isEmail ? "body" : "message",
             target: isEmail ? "active compose textbox" : "active message composer",
             semanticTarget: isEmail ? "active compose textbox" : "active message composer",
-            targetRole: "contenteditable",
-            expectedRole: "contenteditable",
+            targetRole: isEmail ? "COMPOSE_BUTTON" : "MESSAGE_COMPOSER",
+            semanticRole: isEmail ? "COMPOSE_BUTTON" : "MESSAGE_COMPOSER",
+            expectedRole: isEmail ? "COMPOSE_BUTTON" : "MESSAGE_COMPOSER",
             role: "contenteditable",
             context: isEmail ? "compose_body" : "message_composer",
             composerType: isEmail ? "email" : "message",
             requestedIntent: `send a ${noun}`,
+            semanticIntent: isEmail ? "COMPOSE_EMAIL" : "SEND_MESSAGE",
+            expectedTransition: "message_filled",
             value: val
           },
           {
@@ -3015,6 +3425,13 @@
             targetHint: "Send",
             target: "Send",
             semanticTarget: "Send",
+            targetRole: "SEND_BUTTON",
+            semanticRole: "SEND_BUTTON",
+            expectedRole: "SEND_BUTTON",
+            role: "button",
+            semanticIntent: isEmail ? "COMPOSE_EMAIL" : "SEND_MESSAGE",
+            requiresApproval: true,
+            risk: "HIGH",
             legacyTarget: resolveLegacyClickTarget("send")
           }
         ], executionConstraints);
@@ -3133,8 +3550,8 @@
 
         // Guard: Never create or keep target = "write a message", "type a reply", etc.
         const isLiteralIntentTarget = /^(?:write|type|enter|send|draft)\s+(?:a\s+|an\s+)?(message|reply|email|mail|post|comment)/i.test(curTargetLower);
-        const isGenericBody = /^(?:body|content|text|editor|input|message|reply|write|type)$/i.test(curTargetLower);
-        const isExistingActiveComposer = /^(?:active\s+(?:message\s+composer|post\s+composer|compose\s+textbox|reply\s+composer|comment\s+box))$/i.test(curTargetLower);
+        const isGenericBody = /^(?:body|content|text|editor|input|message|reply|write|type|active\s+text\s+editor)$/i.test(curTargetLower);
+        const isExistingActiveComposer = /^(?:active\s+(?:message\s+composer|post\s+composer|compose\s+textbox|reply\s+composer|comment\s+box|text\s+editor))$/i.test(curTargetLower);
 
         // Precedence: If activeComposerContext was explicitly set by a prior CLICK step (e.g. "Start a post"),
         // that concrete active container context overrides conversational words like "write a message", "write", etc.
@@ -3486,6 +3903,32 @@
       ? "MULTI_STEP"
       : (steps[0].type || "NONE");
 
+    let semanticIntentVal = null;
+    if (semanticResolver && typeof semanticResolver.detectSemanticIntent === "function") {
+      semanticIntentVal = semanticResolver.detectSemanticIntent(currentActiveTaskText, steps);
+    }
+
+    // Attach canonical semantic intent and roles to each step and sanitizedPlan
+    steps.forEach((step, idx) => {
+      if (semanticIntentVal && !step.semanticIntent) {
+        step.semanticIntent = semanticIntentVal;
+      }
+      if (semanticResolver && typeof semanticResolver.inferSemanticRoleForStep === "function") {
+        const infRole = semanticResolver.inferSemanticRoleForStep(step);
+        if (infRole) {
+          step.semanticRole = step.semanticRole || infRole;
+          step.targetRole = step.targetRole || infRole;
+          step.expectedRole = step.expectedRole || infRole;
+        }
+      }
+      if (sanitizedPlan[idx]) {
+        if (step.semanticIntent) sanitizedPlan[idx].semanticIntent = step.semanticIntent;
+        if (step.semanticRole) sanitizedPlan[idx].semanticRole = step.semanticRole;
+        if (step.targetRole) sanitizedPlan[idx].targetRole = step.targetRole;
+        if (step.expectedRole) sanitizedPlan[idx].expectedRole = step.expectedRole;
+      }
+    });
+
     const cons = constraintsObj || currentActiveConstraints;
 
     // Attach explicit approval flags to high-impact actions if user or policy requires it
@@ -3529,6 +3972,7 @@
 
     return {
       intent: primaryIntent,
+      semanticIntent: semanticIntentVal || primaryIntent,
       steps: steps,
       goals: goals,
       sanitizedPlan: sanitizedPlan,
@@ -3557,6 +4001,7 @@
     const cons = constraintsObj || currentActiveConstraints;
     return {
       intent: "NONE",
+      semanticIntent: "NONE",
       reason: reason || "Unrecognized task",
       steps: [{ type: "NONE" }],
       sanitizedPlan: [{ type: "NONE" }],

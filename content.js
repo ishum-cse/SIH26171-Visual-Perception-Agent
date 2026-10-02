@@ -46,7 +46,7 @@ function getSemanticTag(type, label, el = null) {
     }
   } else if (type === "input" || type === "combobox" || type === "textarea" || type === "searchbox" || type === "contenteditable" || type === "textbox") {
     // Modal/post composer controls must never be tagged as SEARCH_INPUT
-    const isInDialog = Boolean(el && el.closest && el.closest('[role="dialog"], [aria-modal="true"], .artdeco-modal, .share-box, .share-creation-state, .msg-overlay-conversation-bubble'));
+    const isInDialog = Boolean(el && el.closest && el.closest('[role="dialog"], [role="alertdialog"], [aria-modal="true"], dialog, .modal, .dialog, [class*="modal" i], [class*="dialog" i], [class*="overlay" i]'));
     const isPostIntent = /post|talk\s+about|what\s+do\s+you\s+want\s+to\s+talk\s+about|share\s+your\s+thoughts|thought\s+of\s+the\s+day|start\s+a\s+post|text\s+editor/i.test(normLabel);
     if ((isInDialog || isPostIntent) && (type === "contenteditable" || type === "textbox" || type === "textarea" || (el && el.isContentEditable))) {
       return "POST_COMPOSER";
@@ -486,9 +486,13 @@ function scoreCandidateAgainstDescriptor(cand, targetDesc) {
     targetLabel === "active message composer";
 
   if (isMessageComposerTarget) {
-    if (cand.semanticRole === "SEARCH_INPUT" || cand.semanticTag === "SEARCH_INPUT" || cand.type === "search" || /search/i.test(candLabel) || /search/i.test(candAria)) return 0.0;
+    if (cand.semanticRole === "SEARCH_INPUT" || cand.semanticTag === "SEARCH_INPUT" || cand.type === "search" || /search/i.test(candLabel) || /search/i.test(candAria) || /search/i.test(candPlaceholder)) return 0.0;
     if (cand.semanticRole === "MESSAGE_COMPOSER") return 1.0;
-    if ((cand.isContentEditable || cand.type === "contenteditable" || cand.type === "textarea") && (cand.inDialog || /message/i.test(candLabel + " " + candAria))) return 1.0;
+    const isMsgCap = Boolean(cand.isContentEditable || cand.type === "contenteditable" || cand.type === "textarea" || cand.role === "textbox");
+    const msgClues = /\b(?:message|chat|conversation|write\s+a\s+message|type\s+a\s+message|send\s+a\s+message)\b/i.test(candLabel + " " + candAria + " " + candPlaceholder);
+    if (isMsgCap && (cand.inDialog || msgClues)) return 1.0;
+    if (isMsgCap && /message/i.test(candNearby)) return 0.95;
+    if (isMsgCap) return 0.85;
     return 0.0;
   }
 
@@ -502,14 +506,137 @@ function scoreCandidateAgainstDescriptor(cand, targetDesc) {
     targetLabel === "active reply composer";
 
   if (isReplyComposerTarget) {
-    if (cand.semanticRole === "SEARCH_INPUT" || cand.semanticTag === "SEARCH_INPUT" || cand.type === "search" || /search/i.test(candLabel) || /search/i.test(candAria)) return 0.0;
+    if (cand.semanticRole === "SEARCH_INPUT" || cand.semanticTag === "SEARCH_INPUT" || cand.type === "search" || /search/i.test(candLabel) || /search/i.test(candAria) || /search/i.test(candPlaceholder)) return 0.0;
     if (cand.semanticRole === "REPLY_COMPOSER") return 1.0;
-    if ((cand.isContentEditable || cand.type === "contenteditable" || cand.type === "textarea") && /reply|body/i.test(candLabel + " " + candAria)) return 1.0;
+    const isReplyCap = Boolean(cand.isContentEditable || cand.type === "contenteditable" || cand.type === "textarea" || cand.role === "textbox");
+    const replyClues = /\b(?:reply|response|write\s+a\s+reply|type\s+a\s+reply|body|message\s+body)\b/i.test(candLabel + " " + candAria + " " + candPlaceholder);
+    if (isReplyCap && (cand.inDialog || replyClues)) return 1.0;
+    if (isReplyCap && /reply/i.test(candNearby)) return 0.95;
+    if (isReplyCap) return 0.85;
+    return 0.0;
+  }
+
+  const isCommentComposerTarget = targetDesc.semanticRole === "COMMENT_COMPOSER" ||
+    targetDesc.targetRole === "COMMENT_COMPOSER" ||
+    targetDesc.targetRole === "comment_composer" ||
+    targetDesc.expectedRole === "COMMENT_COMPOSER" ||
+    targetDesc.composerType === "comment" ||
+    targetLabel === "comment composer" ||
+    targetLabel === "active comment box" ||
+    targetLabel === "comment";
+
+  if (isCommentComposerTarget) {
+    if (cand.semanticRole === "SEARCH_INPUT" || cand.semanticTag === "SEARCH_INPUT" || cand.type === "search" || /search/i.test(candLabel) || /search/i.test(candAria) || /search/i.test(candPlaceholder)) return 0.0;
+    if (cand.semanticRole === "COMMENT_COMPOSER") return 1.0;
+    const isCommentCap = Boolean(cand.isContentEditable || cand.type === "contenteditable" || cand.type === "textarea" || cand.role === "textbox");
+    const commentClues = /\b(?:comment|add\s+a\s+comment|write\s+a\s+comment|leave\s+a\s+comment)\b/i.test(candLabel + " " + candAria + " " + candPlaceholder);
+    if (isCommentCap && (cand.inDialog || commentClues)) return 1.0;
+    if (isCommentCap && /comment/i.test(candNearby)) return 0.95;
+    if (isCommentCap) return 0.85;
+    return 0.0;
+  }
+
+  const isChatComposerTarget = targetDesc.semanticRole === "CHAT_COMPOSER" ||
+    targetDesc.targetRole === "CHAT_COMPOSER" ||
+    targetDesc.expectedRole === "CHAT_COMPOSER" ||
+    targetDesc.composerType === "chat" ||
+    targetLabel === "chat composer" ||
+    targetLabel === "chat box";
+
+  if (isChatComposerTarget) {
+    if (cand.semanticRole === "SEARCH_INPUT" || cand.semanticTag === "SEARCH_INPUT" || cand.type === "search" || /search/i.test(candLabel) || /search/i.test(candAria) || /search/i.test(candPlaceholder)) return 0.0;
+    if (cand.semanticRole === "CHAT_COMPOSER") return 1.0;
+    const isChatCap = Boolean(cand.isContentEditable || cand.type === "contenteditable" || cand.type === "textarea" || cand.role === "textbox");
+    const chatClues = /\b(?:chat|type\s+a\s+message|type\s+message|send\s+a\s+message|ask\s+anything|ask)\b/i.test(candLabel + " " + candAria + " " + candPlaceholder);
+    if (isChatCap && (cand.inDialog || chatClues)) return 1.0;
+    if (isChatCap) return 0.85;
+    return 0.0;
+  }
+
+  const isGenericEditorTarget = targetDesc.semanticRole === "GENERIC_TEXT_EDITOR" ||
+    targetDesc.targetRole === "GENERIC_TEXT_EDITOR" ||
+    targetDesc.expectedRole === "GENERIC_TEXT_EDITOR" ||
+    targetLabel === "generic text editor" ||
+    targetLabel === "compose area";
+
+  if (isGenericEditorTarget) {
+    if (cand.semanticRole === "SEARCH_INPUT" || cand.semanticTag === "SEARCH_INPUT" || cand.type === "search" || /search/i.test(candLabel) || /search/i.test(candAria) || /search/i.test(candPlaceholder)) return 0.0;
+    const isEdit = Boolean(cand.isContentEditable || cand.type === "contenteditable" || cand.type === "textarea" || cand.role === "textbox");
+    if (isEdit && cand.inDialog) return 1.0;
+    if (isEdit) return 0.90;
     return 0.0;
   }
 
   const candType = (cand.type || "").toLowerCase();
   const candRole = (cand.role || cand.type || "").toLowerCase();
+
+  // Semantic button targets
+  const isMessageButtonTarget = targetDesc.semanticRole === "MESSAGE_BUTTON" ||
+    targetDesc.targetRole === "MESSAGE_BUTTON" ||
+    targetDesc.expectedRole === "MESSAGE_BUTTON" ||
+    targetLabel === "message button" ||
+    targetLabel === "message";
+
+  if (isMessageButtonTarget) {
+    const isBtn = candType === "button" || candType === "link" || candRole === "button" || candRole === "link";
+    if (isBtn && (candLabel === "message" || candAria === "message" || candLabel.includes("message") || candAria.includes("message"))) {
+      return 1.0;
+    }
+  }
+
+  const isReplyButtonTarget = targetDesc.semanticRole === "REPLY_BUTTON" ||
+    targetDesc.targetRole === "REPLY_BUTTON" ||
+    targetDesc.expectedRole === "REPLY_BUTTON" ||
+    targetLabel === "reply button" ||
+    targetLabel === "reply";
+
+  if (isReplyButtonTarget) {
+    const isBtn = candType === "button" || candType === "link" || candRole === "button" || candRole === "link";
+    if (isBtn && (candLabel === "reply" || candAria === "reply" || candLabel.includes("reply") || candAria.includes("reply"))) {
+      return 1.0;
+    }
+  }
+
+  const isPostEntryTarget = targetDesc.semanticRole === "POST_ENTRY" ||
+    targetDesc.targetRole === "POST_ENTRY" ||
+    targetDesc.expectedRole === "POST_ENTRY" ||
+    targetLabel === "start a post" ||
+    targetLabel === "create a post";
+
+  if (isPostEntryTarget) {
+    const isTrigger = candType === "button" || candType === "link" || candRole === "button" || cand.isContentEditable || candType === "contenteditable";
+    if (isTrigger && (candLabel.includes("start a post") || candAria.includes("start a post") || candPlaceholder.includes("start a post") || candLabel.includes("create a post"))) {
+      return 1.0;
+    }
+  }
+
+  const isSendButtonTarget = targetDesc.semanticRole === "SEND_BUTTON" ||
+    targetDesc.targetRole === "SEND_BUTTON" ||
+    targetDesc.expectedRole === "SEND_BUTTON" ||
+    targetLabel === "send" ||
+    targetLabel === "send button";
+
+  if (isSendButtonTarget) {
+    const isBtn = candType === "button" || candType === "link" || candRole === "button" || candRole === "link";
+    if (isBtn && (candLabel === "send" || candAria === "send" || candLabel.includes("send") || candAria.includes("send"))) {
+      return 1.0;
+    }
+  }
+
+  const isPublishButtonTarget = targetDesc.semanticRole === "PUBLISH_BUTTON" ||
+    targetDesc.targetRole === "PUBLISH_BUTTON" ||
+    targetDesc.expectedRole === "PUBLISH_BUTTON" ||
+    targetLabel === "post" ||
+    targetLabel === "publish" ||
+    targetLabel === "post button" ||
+    targetLabel === "publish button";
+
+  if (isPublishButtonTarget) {
+    const isBtn = candType === "button" || candType === "link" || candRole === "button" || candRole === "link";
+    if (isBtn && (candLabel === "post" || candLabel === "publish" || candAria === "post" || candAria === "publish")) {
+      return 1.0;
+    }
+  }
   const targetRole = (targetDesc.role || targetDesc.targetType || "").toLowerCase();
   const isFormTarget = ["input", "textarea", "select", "combobox", "searchbox", "textbox", "contenteditable"].some(r => targetRole.includes(r)) ||
     Boolean(targetDesc.fieldHint);
@@ -552,17 +679,29 @@ function scoreCandidateAgainstDescriptor(cand, targetDesc) {
     return 0;
   }
 
+  // CRITICAL FIX: Never allow generic candidate labels ("input field", "textarea", "textbox")
+  // to outrank a task-specific semantic target
+  const isGenericLabel = (lbl) => /^(?:input\s*field|field|textarea|textbox|text\s*box|input|text\s*field|text\s*area|form\s*field|control|element)$/i.test(lbl);
+  const candIsGenericLabel = isGenericLabel(candLabel);
+  const targetIsGenericLabel = isGenericLabel(targetLabel);
+
   let score = 0;
 
   // 1. Direct and normalized label match (Exact text outranks proximity and fuzzy similarity)
   const candText = normalize(cand.text);
   if (candLabel === targetLabel || candText === targetLabel) {
-    return 1.0;
-  } else if (candLabel.startsWith(targetLabel) || candText.startsWith(targetLabel)) {
+    if (candIsGenericLabel && targetIsGenericLabel) {
+      score = Math.max(score, 0.20);
+    } else if (candIsGenericLabel) {
+      score = 0.0;
+    } else {
+      return 1.0;
+    }
+  } else if (!candIsGenericLabel && (candLabel.startsWith(targetLabel) || candText.startsWith(targetLabel))) {
     score = Math.max(score, 0.95);
-  } else if (targetLabel.length >= 3 && (candLabel.includes(targetLabel) || targetLabel.includes(candLabel))) {
+  } else if (!candIsGenericLabel && targetLabel.length >= 3 && (candLabel.includes(targetLabel) || targetLabel.includes(candLabel))) {
     score += 0.35;
-  } else {
+  } else if (!candIsGenericLabel) {
     // Token overlap
     const tTokens = targetLabel.split(/\s+/).filter(w => w.length >= 3 || w === "to" || w === "from");
     const cTokens = candLabel.split(/\s+/).filter(w => w.length >= 3 || w === "to" || w === "from");
@@ -958,98 +1097,228 @@ function findClickableExactTextTarget(targetText, freshElements) {
 
 /**
  * Inserts text into a rich-text contenteditable or textbox element using browser editing pipeline.
- * Preferred Chromium path: document.execCommand("insertText", false, value)
- * Followed by selection/range replacement fallback, beforeinput, input, and change event dispatching.
+/**
+ * Generic fillEditableElement(element, value) executor (Sections 6, 7 & 8).
+ * Supports:
+ * - <input>
+ * - <textarea>
+ * - contenteditable elements (isContentEditable === true, contenteditable="true"|"plaintext-only"|"")
+ * - role="textbox" editable elements
+ *
+ * For native input/textarea:
+ * - focus element
+ * - select existing text
+ * - update using correct native setter
+ * - dispatch bubbling input event
+ * - dispatch change event
+ * - verify resulting value
+ *
+ * For contenteditable:
+ * - verify element.isContentEditable or contenteditable attribute
+ * - focus it
+ * - select existing editable content
+ * - insert plain text using document.execCommand("insertText") or selection range fallback
+ * - dispatch beforeinput and input events (inputType="insertText")
+ * - dispatch bubbling input and change events
+ * - verify element.innerText / textContent reflects requested value
+ *
+ * Verification:
+ * If verification fails, retries once using the generic editable adapter.
+ * If it still fails, returns executed: false, verified: false,
+ * reason: "Editable target was grounded but the page did not accept the text."
  *
  * @param {HTMLElement} el
  * @param {string|any} value
- * @returns {boolean}
+ * @returns {{ executed: boolean, verified: boolean, actualValue: string, reason?: string }}
  */
-function insertTextIntoEditable(el, value) {
-  if (!el) return false;
-  const strVal = String(value);
+function fillEditableElement(el, value) {
+  if (!el) return { executed: false, verified: false, reason: "Element not found" };
+  const strVal = String(value !== undefined && value !== null ? value : "");
 
-  // 1. Focus the element
+  // 1. Focus element
   try { el.focus(); } catch (_) {}
-
-  // 2. Verify still connected
-  if (el.isConnected === false) return false;
-
-  // 3. Make sure selection / caret is inside target and select current content
-  let selection = null;
-  try {
-    selection = window.getSelection ? window.getSelection() : null;
-    if (selection) {
-      selection.removeAllRanges();
-      const range = document.createRange();
-      range.selectNodeContents(el);
-      selection.addRange(range);
-    }
-  } catch (_) {}
-
-  // 4. Dispatch beforeinput event if supported
-  try {
-    if (typeof InputEvent === "function") {
-      const beforeEvt = new InputEvent("beforeinput", {
-        bubbles: true,
-        cancelable: true,
-        composed: true,
-        data: strVal,
-        inputType: "insertText"
-      });
-      el.dispatchEvent(beforeEvt);
-    }
-  } catch (_) {}
-
-  // 5. Preferred Chromium path: document.execCommand("insertText", false, value)
-  let execSuccess = false;
-  try {
-    if (typeof document.execCommand === "function") {
-      execSuccess = document.execCommand("insertText", false, strVal);
-    }
-  } catch (_) {}
-
-  // Fallback if execCommand failed or did not update contents
-  const curCheck = (el.textContent || el.innerText || "");
-  if (!execSuccess || !curCheck.includes(strVal)) {
-    try {
-      if (selection && selection.rangeCount > 0) {
-        const range = selection.getRangeAt(0);
-        range.deleteContents();
-        const textNode = document.createTextNode(strVal);
-        range.insertNode(textNode);
-        range.setStartAfter(textNode);
-        range.setEndAfter(textNode);
-        selection.removeAllRanges();
-        selection.addRange(range);
-      } else {
-        while (el.firstChild) {
-          el.removeChild(el.firstChild);
-        }
-        const p = document.createElement("p");
-        p.textContent = strVal;
-        el.appendChild(p);
-      }
-    } catch (_) {
-      el.textContent = strVal;
-    }
+  if (el.isConnected === false) {
+    return { executed: false, verified: false, reason: "Element is disconnected from DOM" };
   }
 
-  // 6. Dispatch synthetic input and change events
-  try {
-    if (typeof InputEvent === "function") {
-      el.dispatchEvent(new InputEvent("input", {
-        bubbles: true,
-        composed: true,
-        data: strVal,
-        inputType: "insertText"
-      }));
-    }
-  } catch (_) {}
-  el.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
-  el.dispatchEvent(new Event("change", { bubbles: true, composed: true }));
+  const tagName = (el.tagName || "").toLowerCase();
+  const isInput = tagName === "input";
+  const isTextarea = tagName === "textarea";
+  const ceAttr = el.getAttribute ? (el.getAttribute("contenteditable") || "").toLowerCase() : "";
+  const isContentEditable = !!(el.isContentEditable || ceAttr === "true" || ceAttr === "plaintext-only" || ceAttr === "");
+  const isRoleTextbox = !!(el.getAttribute && el.getAttribute("role") === "textbox");
 
-  return true;
+  const norm = (s) => (s || "").replace(/\s+/g, " ").trim();
+  const targetVal = norm(strVal);
+
+  if (isInput || isTextarea) {
+    // 2. Select existing text
+    try {
+      if (typeof el.select === "function") {
+        el.select();
+      }
+    } catch (_) {}
+
+    // 3. Update using native property setter
+    try {
+      const proto = isInput
+        ? (typeof window !== "undefined" && window.HTMLInputElement ? window.HTMLInputElement.prototype : Object.getPrototypeOf(el))
+        : (typeof window !== "undefined" && window.HTMLTextAreaElement ? window.HTMLTextAreaElement.prototype : Object.getPrototypeOf(el));
+      const nativeSetter = proto ? Object.getOwnPropertyDescriptor(proto, "value")?.set : null;
+      if (nativeSetter) {
+        nativeSetter.call(el, strVal);
+      } else {
+        el.value = strVal;
+      }
+    } catch (_) {
+      el.value = strVal;
+    }
+
+    // 4. Dispatch bubbling input and change events
+    el.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
+    el.dispatchEvent(new Event("change", { bubbles: true, composed: true }));
+    try {
+      el.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true, composed: true, key: "Enter" }));
+    } catch (_) {}
+
+    // 5. Verification
+    let currentVal = norm(el.value);
+    let verified = currentVal === targetVal || currentVal.includes(targetVal);
+
+    if (!verified) {
+      // Retry once using generic adapter
+      try {
+        el.value = strVal;
+        el.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
+        el.dispatchEvent(new Event("change", { bubbles: true, composed: true }));
+      } catch (_) {}
+      currentVal = norm(el.value);
+      verified = currentVal === targetVal || currentVal.includes(targetVal);
+    }
+
+    if (!verified) {
+      return {
+        executed: false,
+        verified: false,
+        actualValue: currentVal,
+        reason: "Editable target was grounded but the page did not accept the text."
+      };
+    }
+    return { executed: true, verified: true, actualValue: currentVal };
+  }
+
+  if (isContentEditable || isRoleTextbox) {
+    // 1. Focus element
+    try { el.focus(); } catch (_) {}
+
+    // 2. Select existing editable content
+    let selection = null;
+    try {
+      selection = window.getSelection ? window.getSelection() : null;
+      if (selection) {
+        selection.removeAllRanges();
+        const range = document.createRange();
+        range.selectNodeContents(el);
+        selection.addRange(range);
+      }
+    } catch (_) {}
+
+    // 3. Dispatch beforeinput event with inputType="insertText"
+    try {
+      if (typeof InputEvent === "function") {
+        const beforeEvt = new InputEvent("beforeinput", {
+          bubbles: true,
+          cancelable: true,
+          composed: true,
+          data: strVal,
+          inputType: "insertText"
+        });
+        el.dispatchEvent(beforeEvt);
+      }
+    } catch (_) {}
+
+    // 4. Preferred browser editing mechanism: document.execCommand("insertText", false, value)
+    let execSuccess = false;
+    try {
+      if (typeof document.execCommand === "function") {
+        execSuccess = document.execCommand("insertText", false, strVal);
+      }
+    } catch (_) {}
+
+    // 5. Safe DOM fallback if execCommand failed or did not insert text
+    const checkText = (el.innerText || el.textContent || "");
+    if (!execSuccess || !norm(checkText).includes(targetVal)) {
+      try {
+        if (selection && selection.rangeCount > 0) {
+          const range = selection.getRangeAt(0);
+          range.deleteContents();
+          const textNode = document.createTextNode(strVal);
+          range.insertNode(textNode);
+          range.setStartAfter(textNode);
+          range.setEndAfter(textNode);
+          selection.removeAllRanges();
+          selection.addRange(range);
+        } else {
+          while (el.firstChild) {
+            el.removeChild(el.firstChild);
+          }
+          const p = document.createElement("p");
+          p.textContent = strVal;
+          el.appendChild(p);
+        }
+      } catch (_) {
+        el.textContent = strVal;
+      }
+    }
+
+    // 6. Dispatch synthetic InputEvent and change event
+    try {
+      if (typeof InputEvent === "function") {
+        el.dispatchEvent(new InputEvent("input", {
+          bubbles: true,
+          composed: true,
+          data: strVal,
+          inputType: "insertText"
+        }));
+      }
+    } catch (_) {}
+    el.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
+    el.dispatchEvent(new Event("change", { bubbles: true, composed: true }));
+
+    // 7. Verification: element.innerText / textContent contains requested value
+    let curInner = norm(el.innerText || "");
+    let curContent = norm(el.textContent || "");
+    let verified = curInner === targetVal || curContent === targetVal || curInner.includes(targetVal) || curContent.includes(targetVal);
+
+    if (!verified) {
+      // Retry once using generic editable adapter
+      try {
+        el.textContent = strVal;
+        el.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
+        el.dispatchEvent(new Event("change", { bubbles: true, composed: true }));
+      } catch (_) {}
+      curInner = norm(el.innerText || "");
+      curContent = norm(el.textContent || "");
+      verified = curInner === targetVal || curContent === targetVal || curInner.includes(targetVal) || curContent.includes(targetVal);
+    }
+
+    if (!verified) {
+      return {
+        executed: false,
+        verified: false,
+        actualValue: curInner || curContent,
+        reason: "Editable target was grounded but the page did not accept the text."
+      };
+    }
+    return { executed: true, verified: true, actualValue: curInner || curContent };
+  }
+
+  return { executed: false, verified: false, reason: "Target element is not an editable element" };
+}
+
+function insertTextIntoEditable(el, value) {
+  const res = fillEditableElement(el, value);
+  return res.verified;
 }
 
 /**
@@ -1645,23 +1914,11 @@ function executeAction(actionPayload) {
       try { el.focus(); } catch (_) {}
     }
 
-    // 5b. Set value via native property setter + dispatch input/change/keyup events
+    // 5b. Set value via fillEditableElement and verify locally
     try {
-      if (isInput || isTextarea) {
-        const proto = isInput
-          ? (typeof window !== "undefined" && window.HTMLInputElement ? window.HTMLInputElement.prototype : Object.getPrototypeOf(el))
-          : (typeof window !== "undefined" && window.HTMLTextAreaElement ? window.HTMLTextAreaElement.prototype : Object.getPrototypeOf(el));
-        const nativeSetter = Object.getOwnPropertyDescriptor(proto, "value")?.set;
-        if (nativeSetter) {
-          nativeSetter.call(el, String(fillValue));
-        } else {
-          el.value = String(fillValue);
-        }
-        el.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
-        el.dispatchEvent(new Event("change", { bubbles: true, composed: true }));
-        try {
-          el.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true, composed: true, key: "Enter" }));
-        } catch (_) {}
+      let fillRes;
+      if (isInput || isTextarea || isContentEditable || isRoleTextbox) {
+        fillRes = fillEditableElement(el, fillValue);
       } else if (isSelect) {
         let optSelected = false;
         if (el.options && el.options.length > 0) {
@@ -1680,25 +1937,14 @@ function executeAction(actionPayload) {
         if (!optSelected) el.value = String(fillValue);
         el.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
         el.dispatchEvent(new Event("change", { bubbles: true, composed: true }));
-      } else if (isContentEditable || isRoleTextbox) {
-        insertTextIntoEditable(el, fillValue);
+        const normalizeWs = (s) => (s || "").replace(/\s+/g, " ").trim();
+        const verified = normalizeWs(el.value) === normalizeWs(fillValue) || (el.selectedIndex >= 0 && (normalizeWs(el.options[el.selectedIndex]?.text).includes(normalizeWs(fillValue)) || normalizeWs(el.options[el.selectedIndex]?.value) === normalizeWs(fillValue)));
+        fillRes = { executed: verified, verified: verified };
+      } else {
+        fillRes = { executed: false, verified: false, reason: "Target element is not a fillable form control" };
       }
 
-      // 7. Verify locally afterward (never return actual value string in result object)
-      const normalizeWs = (s) => (s || "").replace(/\s+/g, " ").trim();
-      let verified = false;
-      if (isInput || isTextarea) {
-        verified = normalizeWs(el.value) === normalizeWs(fillValue);
-      } else if (isSelect) {
-        verified = normalizeWs(el.value) === normalizeWs(fillValue) || (el.selectedIndex >= 0 && (normalizeWs(el.options[el.selectedIndex]?.text).includes(normalizeWs(fillValue)) || normalizeWs(el.options[el.selectedIndex]?.value) === normalizeWs(fillValue)));
-      } else if (isContentEditable || isRoleTextbox) {
-        const curInner = normalizeWs(el.innerText || "");
-        const curContent = normalizeWs(el.textContent || "");
-        const targetVal = normalizeWs(fillValue);
-        verified = curInner === targetVal || curContent === targetVal || curInner.includes(targetVal) || curContent.includes(targetVal);
-      }
-
-      if (!verified) {
+      if (!fillRes.verified) {
         return {
           executed: false,
           action: "FILL",
@@ -1706,7 +1952,7 @@ function executeAction(actionPayload) {
           targetLabel: matched.label,
           groundedIndex: typeof targetIndex === "number" ? targetIndex : freshElements.indexOf(matched),
           verified: false,
-          reason: "Verification failed: target editor does not contain the expected text after insertion."
+          reason: fillRes.reason || "Editable target was grounded but the page did not accept the text."
         };
       }
 
@@ -2338,7 +2584,7 @@ function getVisibleRect(el) {
  * Generic DOM visual perception selector.
  * Detects visible buttons, links, inputs, textareas, selects, ARIA interactive roles, and headings.
  */
-const VISUAL_SELECTOR = "button, a[href], input, textarea, select, [role='button'], [role='link'], [role='checkbox'], [role='radio'], [role='combobox'], [role='searchbox'], [role='textbox'], [contenteditable='true'], [aria-autocomplete], [role='option'], [role='tab'], [role='menuitem'], [role='switch'], h1, h2, h3, h4, h5, h6, [tabindex]:not([tabindex='-1'])";
+const VISUAL_SELECTOR = "button, a[href], input, textarea, select, [role='button'], [role='link'], [role='checkbox'], [role='radio'], [role='combobox'], [role='searchbox'], [role='textbox'], [contenteditable]:not([contenteditable='false']), [aria-autocomplete], [role='option'], [role='tab'], [role='menuitem'], [role='switch'], h1, h2, h3, h4, h5, h6, [tabindex]:not([tabindex='-1'])";
 
 /**
  * Humanizes element name attributes (e.g. "full_name" -> "Full Name", "userEmail" -> "User Email").
@@ -2743,11 +2989,42 @@ function classifyVisualElement(el, fieldId = null) {
     return null;
   }
 
-  // 2. Identify UI element type
+  // 2. Identify UI element type & Universal Editable Target Model (Part 2)
   const tagName = (el.tagName || "").toLowerCase();
   const elRole = el.getAttribute ? (el.getAttribute("role") || "").toLowerCase() : "";
   const hasAriaAutocomplete = el.getAttribute && !!el.getAttribute("aria-autocomplete");
-  const isContentEditable = !!(el.isContentEditable || (el.getAttribute && el.getAttribute("contenteditable") === "true"));
+  const rawCe = el.getAttribute ? el.getAttribute("contenteditable") : null;
+  const hasCeAttr = rawCe !== null && rawCe !== undefined;
+  const ceAttr = hasCeAttr ? String(rawCe) : null;
+  const ceAttrLower = hasCeAttr ? ceAttr.toLowerCase().trim() : null;
+  const isContentEditable = !!(
+    el.isContentEditable === true ||
+    (hasCeAttr && (ceAttrLower === "true" || ceAttrLower === "plaintext-only" || ceAttrLower === ""))
+  );
+
+  let inputKind = null;
+  let isEditableTarget = false;
+
+  if (tagName === "input") {
+    const inputType = (el.type || "text").toLowerCase();
+    if (!["button", "submit", "reset", "checkbox", "radio", "image", "file", "color", "hidden"].includes(inputType)) {
+      inputKind = "NATIVE_INPUT";
+      isEditableTarget = true;
+    }
+  } else if (tagName === "textarea") {
+    inputKind = "NATIVE_TEXTAREA";
+    isEditableTarget = true;
+  } else if (isContentEditable) {
+    inputKind = "CONTENTEDITABLE";
+    isEditableTarget = true;
+  } else if (elRole === "textbox" && (isContentEditable || !el.getAttribute || el.getAttribute("aria-readonly") !== "true")) {
+    inputKind = "ARIA_TEXTBOX";
+    isEditableTarget = true;
+  } else if (elRole === "combobox" || elRole === "searchbox" || hasAriaAutocomplete) {
+    inputKind = "OTHER_EDITABLE";
+    isEditableTarget = true;
+  }
+
   let type = "element";
 
   if (/^h[1-6]$/.test(tagName)) {
@@ -2774,7 +3051,9 @@ function classifyVisualElement(el, fieldId = null) {
     type = "combobox";
   } else if (elRole === "searchbox") {
     type = "searchbox";
-  } else if (elRole === "textbox" || isContentEditable) {
+  } else if (isContentEditable) {
+    type = "contenteditable";
+  } else if (elRole === "textbox") {
     type = (el.getAttribute && el.getAttribute("aria-multiline") === "true") || tagName === "textarea" ? "textarea" : "input";
   } else if (["checkbox", "radio", "tab", "menuitem", "switch"].includes(elRole)) {
     type = elRole;
@@ -2932,7 +3211,7 @@ function classifyVisualElement(el, fieldId = null) {
   let containerRole = null;
   try {
     if (el.closest) {
-      const dialogAncestor = el.closest('[role="dialog"], [role="alertdialog"], [aria-modal="true"], dialog, .artdeco-modal, .msg-overlay-conversation-bubble, .modal, .dialog');
+      const dialogAncestor = el.closest('[role="dialog"], [role="alertdialog"], [aria-modal="true"], dialog, .modal, .dialog, [class*="modal" i], [class*="dialog" i], [class*="popup" i], [class*="overlay" i]');
       if (dialogAncestor) {
         inDialog = true;
         inModal = true;
@@ -2955,7 +3234,17 @@ function classifyVisualElement(el, fieldId = null) {
     visible: true,
     enabled: !isDisabled,
     disabled: isDisabled,
+    editable: isEditableTarget,
+    contentEditable: ceAttr || (el.contentEditable !== undefined ? el.contentEditable : null),
     isContentEditable: isContentEditable,
+    inputKind: inputKind,
+    boundingBox: {
+      x: Math.round(rect.x),
+      y: Math.round(rect.y),
+      width: Math.round(rect.width),
+      height: Math.round(rect.height)
+    },
+    parentContext: containerRole || (inDialog ? "dialog" : null),
     inDialog: inDialog,
     inModal: inModal,
     containerRole: containerRole,
@@ -3329,6 +3618,81 @@ function checkValueSensitivity(val) {
 }
 
 /**
+ * Helper to retrieve contextual sensitive spans from pii-detector.
+ * @param {string} text
+ * @returns {Array<Object>}
+ */
+function getContextualSensitiveSpans(text) {
+  if (!text || typeof text !== "string") return [];
+  try {
+    if (typeof detectContextualSensitiveSpans === "function") {
+      return detectContextualSensitiveSpans(text);
+    }
+    if (typeof window !== "undefined" && typeof window.detectContextualSensitiveSpans === "function") {
+      return window.detectContextualSensitiveSpans(text);
+    }
+    if (typeof globalThis !== "undefined" && typeof globalThis.detectContextualSensitiveSpans === "function") {
+      return globalThis.detectContextualSensitiveSpans(text);
+    }
+    if (typeof require === "function") {
+      try {
+        const pii = require("./pii-detector.js");
+        if (pii && typeof pii.detectContextualSensitiveSpans === "function") {
+          return pii.detectContextualSensitiveSpans(text);
+        }
+      } catch (_) {}
+    }
+  } catch (_) {}
+  return [];
+}
+
+/**
+ * Calculates screen pixel coordinates for character range within an element's text nodes.
+ * @param {Element} element
+ * @param {number} startIndex
+ * @param {number} endIndex
+ * @returns {DOMRect|null}
+ */
+function findTextRangeRect(element, startIndex, endIndex) {
+  if (typeof document === "undefined" || !document.createRange || typeof NodeFilter === "undefined") return null;
+  try {
+    const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT, null, false);
+    let currentNode = walker.nextNode();
+    let currentOffset = 0;
+    let startNode = null;
+    let startCharOffset = 0;
+    let endNode = null;
+    let endCharOffset = 0;
+
+    while (currentNode) {
+      const nodeLength = (currentNode.textContent || "").length;
+      if (!startNode && currentOffset + nodeLength >= startIndex) {
+        startNode = currentNode;
+        startCharOffset = Math.max(0, startIndex - currentOffset);
+      }
+      if (startNode && currentOffset + nodeLength >= endIndex) {
+        endNode = currentNode;
+        endCharOffset = Math.min(nodeLength, endIndex - currentOffset);
+        break;
+      }
+      currentOffset += nodeLength;
+      currentNode = walker.nextNode();
+    }
+
+    if (startNode && endNode) {
+      const range = document.createRange();
+      range.setStart(startNode, startCharOffset);
+      range.setEnd(endNode, endCharOffset);
+      const rect = range.getBoundingClientRect();
+      if (rect && rect.width > 0 && rect.height > 0) {
+        return rect;
+      }
+    }
+  } catch (_) {}
+  return null;
+}
+
+/**
  * Helper to identify DOM text elements that contain sensitive PII (Layer 4 Cross-element & text perception).
  * Scans leaf elements or short text blocks containing sensitive identifiers,
  * personal names, sensitive dates, banking details, or employment context.
@@ -3355,6 +3719,32 @@ function extractSensitiveTextRegions() {
 
     const text = (el.innerText || el.textContent || "").trim();
     if (!text || text.length > 300 || text.includes("[REDACTED_")) {
+      return;
+    }
+
+    // M28: Local Contextual Sensitive Identifier Detection
+    const contextualSpans = getContextualSensitiveSpans(text);
+    if (contextualSpans && contextualSpans.length > 0) {
+      contextualSpans.forEach((span) => {
+        let spanRect = null;
+        if (typeof span.startIndex === "number" && typeof span.endIndex === "number") {
+          spanRect = findTextRangeRect(el, span.startIndex, span.endIndex);
+        }
+        if (!spanRect) {
+          spanRect = getVisibleRect(el);
+        }
+        if (spanRect && spanRect.width > 0 && spanRect.height > 0) {
+          regions.push({
+            x: Math.round(spanRect.x !== undefined ? spanRect.x : (spanRect.left || 0)),
+            y: Math.round(spanRect.y !== undefined ? spanRect.y : (spanRect.top || 0)),
+            width: Math.round(spanRect.width),
+            height: Math.round(spanRect.height),
+            source: "dom-contextual-text",
+            category: span.type || "OTHER_CONTEXTUAL_IDENTIFIER",
+            confidence: "HIGH"
+          });
+        }
+      });
       return;
     }
 
@@ -3386,6 +3776,23 @@ function extractSensitiveTextRegions() {
       const valText = (cells[1].innerText || cells[1].textContent || "").trim();
       if (labelText && valText && !valText.includes("[REDACTED_")) {
         const combined = `${labelText}: ${valText}`;
+        const ctxSpans = getContextualSensitiveSpans(combined);
+        if (ctxSpans && ctxSpans.length > 0) {
+          const valRect = getVisibleRect(cells[1]);
+          if (valRect && valRect.width > 0 && valRect.height > 0) {
+            regions.push({
+              x: Math.round(valRect.x !== undefined ? valRect.x : (valRect.left || 0)),
+              y: Math.round(valRect.y !== undefined ? valRect.y : (valRect.top || 0)),
+              width: Math.round(valRect.width),
+              height: Math.round(valRect.height),
+              source: "dom-contextual-text",
+              category: ctxSpans[0].type || "OTHER_CONTEXTUAL_IDENTIFIER",
+              confidence: "HIGH"
+            });
+          }
+          return;
+        }
+
         const check = checkValueSensitivity(combined);
         if (check && check.detected) {
           const valRect = getVisibleRect(cells[1]);
@@ -4194,6 +4601,11 @@ if (typeof module !== "undefined" && module.exports) {
     findClickableExactTextTarget,
     scoreCandidateAgainstDescriptor,
     insertTextIntoEditable,
+    fillEditableElement,
     SENSITIVE_CONTROL_SELECTOR
   };
+}
+
+if (typeof window !== "undefined") {
+  window.fillEditableElement = fillEditableElement;
 }

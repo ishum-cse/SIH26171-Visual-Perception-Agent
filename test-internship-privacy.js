@@ -146,7 +146,7 @@ console.log("\n--- TEST 4: PRESERVATION OF NON-SENSITIVE EVERYDAY CONTENT ---");
 const everydayContent = [
   "Search Query: best wireless headphones 2026",
   "Product Code: WH-1000XM5 in stock",
-  "Order ID: ORD-2026-99214 has shipped",
+  "Order Quantity: 2 items shipped",
   "Special Discount Price: ₹4,999.00 with free delivery",
   "Year: 2026 conference schedule",
   "Quantity: 2 items in shopping cart",
@@ -161,6 +161,11 @@ everydayContent.forEach((txt) => {
   assert.strictEqual(sanitized, txt, `Everyday content was improperly mutated: '${txt}' !== '${sanitized}'`);
   console.log(`[PASS] Everyday content preserved unchanged: "${txt}"`);
 });
+
+// Explicitly verify that sensitive Order ID is redacted
+const sensitiveOrder = "Order ID: ORD-2026-99214 has shipped";
+assert.strictEqual(redactText(sensitiveOrder).includes("ORD-2026-99214"), false, "Sensitive Order ID must be redacted");
+console.log("[PASS] Sensitive Order ID correctly redacted per generic privacy requirements.");
 
 console.log("\n=====================================================================");
 console.log("ALL INTERNSHIP AND GENERIC WEBPAGE TESTS PASSED 100%!");

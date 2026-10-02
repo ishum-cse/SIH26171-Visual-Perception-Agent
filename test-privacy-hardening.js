@@ -238,6 +238,12 @@ const positiveTestCases = [
     name: "Private Key PEM Block",
     raw: "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA0mockkeydatahere\n-----END RSA PRIVATE KEY-----",
     text: "Certificate:\n-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA0mockkeydatahere\n-----END RSA PRIVATE KEY-----"
+  },
+  {
+    category: "IDENTITY",
+    name: "Order ID with Alphanumeric format",
+    raw: "ORD-2026-10452",
+    text: "Your Order ID: ORD-2026-10452 has been confirmed."
   }
 ];
 
@@ -264,12 +270,8 @@ console.log("\n--- SECTION 2: FALSE-POSITIVE PROTECTION TESTS (NEGATIVE CASES) -
 
 const negativeTestCases = [
   {
-    name: "Order ID with Alphanumeric format",
-    text: "Your Order ID: ORD-2026-10452 has been confirmed."
-  },
-  {
-    name: "Order Number with Numeric digits",
-    text: "Order Number: 12345678 is currently being packaged."
+    name: "Order Quantity with Numeric digits",
+    text: "Order Quantity: 2 items are currently being packaged."
   },
   {
     name: "Product Code with alphanumeric code",

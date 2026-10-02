@@ -338,10 +338,13 @@ function detectSensitiveOcrRegions(ocrData) {
     const lineA = lines[i];
     const lineB = lines[i + 1];
     if (!lineA || !lineB || !lineA.text || !lineB.text) continue;
-    const combined = `${lineA.text}: ${lineB.text}`;
     const checkA = inspectTextSensitivity(lineA.text);
     if (!checkA.sensitive) {
-      const checkCombined = inspectTextSensitivity(combined);
+      const combinedColon = `${lineA.text}: ${lineB.text}`;
+      const combinedSpace = `${lineA.text} ${lineB.text}`;
+      const checkCombined = inspectTextSensitivity(combinedColon).sensitive
+        ? inspectTextSensitivity(combinedColon)
+        : inspectTextSensitivity(combinedSpace);
       if (checkCombined.sensitive) {
         if (lineB.width > 0 && lineB.height > 0) {
           regions.push({

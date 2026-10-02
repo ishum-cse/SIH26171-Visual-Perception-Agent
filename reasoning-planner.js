@@ -427,12 +427,14 @@
           action: "FILL",
           target: resolvedTarget,
           fieldHint: rawStep.fieldHint || (isSearchStep ? "search" : resolvedTarget),
-          value: rawStep.value || (parsedTask && parsedTask.localValues && rawStep.fieldHint && (parsedTask.localValues[rawStep.fieldHint] || parsedTask.localValues[rawStep.fieldHint.toLowerCase()])) || null,
+          value: null,
           query: rawStep.query || (isSearchStep ? (rawStep.value || rawStep.query) : null),
           semanticTarget: resolvedTarget,
           targetRole: resolvedRole,
           expectedRole: resolvedRole,
           role: resolvedRole,
+          semanticRole: rawStep.semanticRole || resolvedRole,
+          semanticIntent: rawStep.semanticIntent || (parsedTask && parsedTask.semanticIntent) || null,
           isSearchIntent: isSearchStep,
           isAiAssistantIntent: !!rawStep.isAiAssistantIntent,
           risk: riskAssessment.risk || riskAssessment.level,
@@ -492,6 +494,9 @@
           targetIntent: rawStep.targetIntent || null,
           expectedRole: rawStep.expectedRole || rawStep.role || (isSearchRes ? "link" : "button"),
           role: rawStep.role || rawStep.expectedRole || (isSearchRes ? "link" : "button"),
+          targetRole: rawStep.targetRole || rawStep.semanticRole || rawStep.expectedRole || (isSearchRes ? "link" : "button"),
+          semanticRole: rawStep.semanticRole || (rawStep.expectedRole && typeof rawStep.expectedRole === "string" && rawStep.expectedRole.includes("_") ? rawStep.expectedRole : null) || (isSearchRes ? "RESULT_LINK" : "button"),
+          semanticIntent: rawStep.semanticIntent || (parsedTask && parsedTask.semanticIntent) || null,
           legacyTarget: rawStep.legacyTarget || null,
           query: rawStep.query || null,
           domain: concreteDomain,
@@ -827,7 +832,7 @@
           });
         }
 
-        step.value = rawVal;
+        step.value = step.isSearchIntent ? rawVal : null;
         if (parsedTask && parsedTask.localValues) {
           parsedTask.localValues[step.stepId] = rawVal;
           if (step.fieldHint) parsedTask.localValues[step.fieldHint.toLowerCase()] = rawVal;
@@ -836,15 +841,41 @@
         normalizedSteps.push(step);
       } else if (stepType === "CLICK" || stepType === "OPEN") {
         const tNorm = (step.target || step.targetHint || "").toLowerCase();
-        const isSend = tNorm === "send" || /\bsend\b/i.test(tNorm) || step.legacyTarget === "SEND_BUTTON";
-        const isSubmit = tNorm === "submit" || /\bsubmit\b/i.test(tNorm) || step.legacyTarget === "SUBMIT_BUTTON";
+        const isComposerOpener = /^(?:start|create|write|open|new)\s+(?:a\s+)?post\b/i.test(tNorm) || step.semanticRole === "POST_ENTRY" || step.targetRole === "POST_ENTRY" || step.semanticRole === "MESSAGE_BUTTON" || step.targetRole === "MESSAGE_BUTTON" || step.semanticRole === "REPLY_BUTTON" || step.targetRole === "REPLY_BUTTON";
+        const isSend = !isComposerOpener && (tNorm === "send" || tNorm === "send message" || step.legacyTarget === "SEND_BUTTON" || step.targetRole === "SEND_BUTTON" || step.semanticRole === "SEND_BUTTON");
+        const isPublish = !isComposerOpener && (tNorm === "post" || tNorm === "publish" || step.legacyTarget === "PUBLISH_BUTTON" || step.targetRole === "PUBLISH_BUTTON" || step.semanticRole === "PUBLISH_BUTTON");
+        const isSubmit = tNorm === "submit" || /\bsubmit\b/i.test(tNorm) || step.legacyTarget === "SUBMIT_BUTTON" || step.targetRole === "SUBMIT_BUTTON" || step.semanticRole === "SUBMIT_BUTTON";
         const isBuy = tNorm === "buy" || tNorm === "checkout" || /\b(?:buy|checkout|purchase)\b/i.test(tNorm);
 
-        if (isSend) {
+        if (isComposerOpener) {
+          step.requiresApproval = false;
+          step.risk = RISK_LEVELS.MEDIUM;
+          step.level = RISK_LEVELS.MEDIUM;
+          if (step.semanticRole === "POST_ENTRY" || /post/i.test(tNorm)) {
+            step.expectedTransition = "post_composer_open";
+          } else if (step.semanticRole === "MESSAGE_BUTTON" || /message/i.test(tNorm)) {
+            step.expectedTransition = "message_composer_open";
+          } else if (step.semanticRole === "REPLY_BUTTON" || /reply/i.test(tNorm)) {
+            step.expectedTransition = "reply_composer_open";
+          }
+        } else if (isSend) {
           if (doNotSend) {
             step.doNotExecute = true;
             step.requiresApproval = false;
-          } else if (reqSendApproval) {
+          } else {
+            step.requiresApproval = true;
+            step.risk = RISK_LEVELS.HIGH;
+            step.level = RISK_LEVELS.HIGH;
+            if (!step.preconditions) step.preconditions = [];
+            if (!step.preconditions.includes("human_approval_granted")) {
+              step.preconditions.push("human_approval_granted");
+            }
+          }
+        } else if (isPublish) {
+          if (doNotSend) {
+            step.doNotExecute = true;
+            step.requiresApproval = false;
+          } else {
             step.requiresApproval = true;
             step.risk = RISK_LEVELS.HIGH;
             step.level = RISK_LEVELS.HIGH;
@@ -963,6 +994,7 @@
 
     return {
       ...plan,
+      semanticIntent: (parsedTask && parsedTask.semanticIntent) || (plan && plan.semanticIntent) || null,
       steps: finalSteps,
       totalSteps: finalSteps.length,
       hasHighRiskStep: hasHighRisk,

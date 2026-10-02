@@ -473,6 +473,7 @@ document.addEventListener("DOMContentLoaded", () => {
   let previousScreenSignature = null;
   let executionTraceHistory = [];
   let activeExecutionSessionToken = 0;
+  let currentPerceptionGeneration = 1;
 
   // State cache for current capture pass
   let latestScreenshotDataUrl = null;
@@ -1283,6 +1284,9 @@ document.addEventListener("DOMContentLoaded", () => {
     }
     if (normLast === "SCROLL") {
       return { canReuse: false, reason: "FRESH — Forced by SCROLL (viewport coordinates shifted)" };
+    }
+    if (["NAVIGATE", "OPEN", "CHECK", "UNCHECK", "SELECT", "TOGGLE"].includes(normLast)) {
+      return { canReuse: false, reason: `FRESH — Forced by ${normLast} (state-changing action)` };
     }
 
     // 6. If next planned action is explicitly SCROLL or SUBMIT:
@@ -2595,7 +2599,11 @@ document.addEventListener("DOMContentLoaded", () => {
               ? response.sensitiveDetectionMs
               : 0;
 
+            currentPerceptionGeneration++;
             latestVisualElements = response.visualElements || [];
+            latestVisualElements.forEach((el) => {
+              el.perceptionGeneration = currentPerceptionGeneration;
+            });
             latestSensitiveRegions = response.sensitiveRegions || [];
             latestPageData = response;
 
@@ -3047,6 +3055,11 @@ document.addEventListener("DOMContentLoaded", () => {
           currentIntent: null,
           currentPage: null,
           previousAction: null,
+          previousTarget: null,
+          previousVerifiedState: null,
+          currentDialog: null,
+          currentContainer: "main",
+          currentSemanticIntent: null,
           establishedEntities: []
         };
 
@@ -4556,73 +4569,135 @@ document.addEventListener("DOMContentLoaded", () => {
                 let runnerUpIdx = -1;
                 const expectedRole = (isSearchStep ? "PRIMARY_SEARCH_INPUT" : (currentStepPlan.expectedRole || currentStepPlan.role || "")).toLowerCase();
                 const fillCandidates = latestFusedElements || latestVisualElements || [];
-                fillCandidates.forEach((el, idx) => {
-                  let score = isSearchStep
-                    ? scoreSearchCandidate(el, task, hasExplicitAi)
-                    : scoreElementForField(el, currentStepPlan.fieldHint);
-                  if (score > 0 && expectedRole && !isSearchStep) {
-                    const elType = (el.type || "").toLowerCase();
-                    if (expectedRole.includes(elType) || (expectedRole.includes("textarea") && (elType === "textarea" || elType === "contenteditable")) || (expectedRole.includes("combobox") && elType === "combobox")) {
-                      score = Math.min(1.0, score + 0.10);
-                    }
-                  }
-                  if (score > 0 && el.isVisualConfirmed && !isSearchStep) {
-                    score = Math.min(1.0, score + 0.10);
-                  }
-                  if (score > bestScore) {
-                    runnerUpScore = bestScore;
-                    runnerUpIdx = bestIdx;
-                    bestScore = score;
-                    bestIdx = idx;
-                  } else if (score > runnerUpScore) {
-                    runnerUpScore = score;
-                    runnerUpIdx = idx;
-                  }
-                });
 
-                // Safety Gate: Ambiguity Rejection (Requirement 10)
-                let isAmbiguous = false;
-                if (bestIdx >= 0 && runnerUpIdx >= 0 && Math.abs(bestScore - runnerUpScore) < 0.05) {
-                  const bestEl = fillCandidates[bestIdx];
-                  const runnerUpEl = fillCandidates[runnerUpIdx];
-                  if (bestEl.label !== runnerUpEl.label && normalize(bestEl.label) !== normalize(runnerUpEl.label)) {
-                    isAmbiguous = true;
-                  }
+                // Generic Semantic Editable Target Resolution (Parts 2, 4, 5, 26)
+                let semanticResolved = null;
+                const semResolver = window.SIHSemanticResolver || (typeof require === "function" ? (function(){ try { return require("./semantic-resolver.js"); } catch(e){ return null; } })() : null);
+                if (semResolver && typeof semResolver.resolveEditableTarget === "function" && !isSearchStep) {
+                  const intentDesc = {
+                    intent: currentStepPlan.semanticIntent || (parsedTask && parsedTask.semanticIntent) || "GENERIC_TEXT_EDITOR",
+                    role: currentStepPlan.semanticRole || currentStepPlan.expectedRole || currentStepPlan.targetRole || null,
+                    composerType: currentStepPlan.composerType || null,
+                    fieldHint: currentStepPlan.fieldHint || currentStepPlan.targetHint || currentStepPlan.target || ""
+                  };
+                  const ctxDesc = {
+                    previousAction: taskContext.previousAction,
+                    previousTarget: taskContext.previousTarget,
+                    inDialog: Boolean(taskContext.currentDialog || fillCandidates.some(c => c.inDialog)),
+                    container: taskContext.currentContainer || "main",
+                    task: task
+                  };
+                  semanticResolved = semResolver.resolveEditableTarget(intentDesc, fillCandidates, ctxDesc);
                 }
 
-                if (isAmbiguous) {
-                  const isComm = (currentStepPlan && (currentStepPlan.context === "communication_composer" || currentStepPlan.composerType || currentStepPlan.context === "post_composer" || currentStepPlan.context === "message_composer"));
-                  agentAction = {
-                    action: "NONE",
-                    target: null,
-                    reason: isComm
-                      ? "AMBIGUOUS COMMUNICATION COMPOSER"
-                      : `Ambiguous field targets: multiple candidates match '${currentStepPlan.fieldHint}' with similar confidence.`
-                  };
-                } else if (bestIdx >= 0 && bestScore >= 0.35) {
-                  const matchedEl = fillCandidates[bestIdx];
-                  const cleanSearchLabel = matchedEl.label && !/^(?:how\s+search\s+works|ai\s+mode|textarea|input)$/i.test(matchedEl.label) ? matchedEl.label : "Search";
+                if (semanticResolved && semanticResolved.target && semanticResolved.score >= 0.35) {
+                  const matchedEl = semanticResolved.target;
+                  bestIdx = matchedEl.index !== undefined ? matchedEl.index : fillCandidates.indexOf(matchedEl);
+                  bestScore = semanticResolved.score;
+                  const resolvedRole = matchedEl.role || matchedEl.type || "textbox";
+                  const resolvedTag = matchedEl.tag || matchedEl.semanticTag || (matchedEl.type === "contenteditable" ? "contenteditable" : (matchedEl.type || "input"));
+                  const containerType = (matchedEl.inDialog || taskContext.currentDialog) ? "dialog" : (matchedEl.containerRole || "container");
+                  const candidateCount = semanticResolved.candidateCount || fillCandidates.length;
+                  const groundingMethod = semanticResolved.method || "semantic+container+visual";
+
                   agentAction = {
                     action: "FILL",
-                    target: isSearchStep ? "PRIMARY_SEARCH_INPUT" : (matchedEl.label || matchedEl.ariaLabel || matchedEl.placeholder || currentStepPlan.target || currentStepPlan.fieldHint),
-                    targetRole: isSearchStep ? "PRIMARY_SEARCH_INPUT" : undefined,
-                    targetIndex: matchedEl.index !== undefined ? matchedEl.index : bestIdx,
-                    targetType: matchedEl.type,
-                    targetLabel: isSearchStep ? cleanSearchLabel : (matchedEl.label || matchedEl.ariaLabel || matchedEl.placeholder || currentStepPlan.fieldHint),
+                    target: matchedEl.label || matchedEl.ariaLabel || matchedEl.placeholder || currentStepPlan.target || currentStepPlan.fieldHint,
+                    targetIndex: bestIdx,
+                    targetType: matchedEl.type || "contenteditable",
+                    targetLabel: matchedEl.label || matchedEl.ariaLabel || matchedEl.placeholder || currentStepPlan.fieldHint,
                     fieldHint: currentStepPlan.fieldHint,
-                    semanticTarget: currentStepPlan.semanticTarget || (isSearchStep ? "PRIMARY_SEARCH_INPUT" : (matchedEl.label || matchedEl.ariaLabel || matchedEl.placeholder)),
+                    semanticTarget: currentStepPlan.semanticTarget || semanticResolved.role || currentStepPlan.fieldHint,
                     value: authoritativeVal || currentStepPlan.value || (data.action?.value) || "",
                     groundingScore: bestScore,
-                    groundingMethod: isSearchStep ? "primary-search-ranking" : (matchedEl.isVisualConfirmed ? "dom+visual-fusion" : "local-fuzzy-match"),
-                    semanticTargetDescriptor: createSemanticTargetDescriptor(matchedEl, currentStepPlan.fieldHint, isSearchStep ? "PRIMARY_SEARCH_INPUT" : expectedRole)
+                    groundingMethod: groundingMethod,
+                    semanticTargetDescriptor: createSemanticTargetDescriptor(matchedEl, currentStepPlan.fieldHint, expectedRole)
                   };
-                  const reqTarget = currentStepPlan.target || currentStepPlan.fieldHint || "input";
-                  const candName = agentAction.targetLabel || agentAction.target || reqTarget;
-                  const roleName = agentAction.targetType || "contenteditable";
-                  const scoreVal = Number(bestScore || 0.95).toFixed(2);
+
                   const fillVal = agentAction.value || authoritativeVal || currentStepPlan.value || "[text]";
-                  appendPlannerTrace(`[GROUNDING TRACE]\nAction:\nFILL\n\nRequested Target:\n${reqTarget}\n\nCandidate:\n${candName}\n\nRole:\n${roleName}\n\nSemantic Score:\n${scoreVal}\n\nAction Compatibility:\nHIGH\n\nValue:\n${fillVal}\n\nFinal Decision:\nGROUNDED`);
+                  const safeFillVal = (typeof redactText === "function" ? redactText(String(fillVal)) : (window.SIHPrivacyRedactor?.redactText ? window.SIHPrivacyRedactor.redactText(String(fillVal)) : "[text]"));
+                  appendPlannerTrace(
+                    `[GROUNDING AUDIT]\n` +
+                    `semanticTarget: ${agentAction.semanticTarget}\n` +
+                    `resolvedRole: ${resolvedRole}\n` +
+                    `resolvedTag: ${resolvedTag}\n` +
+                    `containerType: ${containerType}\n` +
+                    `candidateCount: ${candidateCount}\n` +
+                    `groundingScore: ${Number(bestScore).toFixed(2)}\n` +
+                    `groundingMethod: ${groundingMethod}\n` +
+                    `postActionPerception: true\n` +
+                    `confidence: ${Number(bestScore).toFixed(2)}`
+                  );
+                  appendPlannerTrace(`[GROUNDING TRACE]\nAction:\nFILL\n\nRequested Target:\n${agentAction.semanticTarget}\n\nCandidate:\n${agentAction.targetLabel}\n\nRole:\n${resolvedRole}\n\nSemantic Score:\n${Number(bestScore).toFixed(2)}\n\nAction Compatibility:\nHIGH\n\nValue:\n${safeFillVal}\n\nFinal Decision:\nGROUNDED`);
                 } else {
+                  fillCandidates.forEach((el, idx) => {
+                    let score = isSearchStep
+                      ? scoreSearchCandidate(el, task, hasExplicitAi)
+                      : scoreElementForField(el, currentStepPlan.fieldHint);
+                    if (score > 0 && expectedRole && !isSearchStep) {
+                      const elType = (el.type || "").toLowerCase();
+                      if (expectedRole.includes(elType) || (expectedRole.includes("textarea") && (elType === "textarea" || elType === "contenteditable")) || (expectedRole.includes("combobox") && elType === "combobox")) {
+                        score = Math.min(1.0, score + 0.10);
+                      }
+                    }
+                    if (score > 0 && el.isVisualConfirmed && !isSearchStep) {
+                      score = Math.min(1.0, score + 0.10);
+                    }
+                    if (score > bestScore) {
+                      runnerUpScore = bestScore;
+                      runnerUpIdx = bestIdx;
+                      bestScore = score;
+                      bestIdx = idx;
+                    } else if (score > runnerUpScore) {
+                      runnerUpScore = score;
+                      runnerUpIdx = idx;
+                    }
+                  });
+
+                  // Safety Gate: Ambiguity Rejection (Requirement 10)
+                  let isAmbiguous = false;
+                  if (bestIdx >= 0 && runnerUpIdx >= 0 && Math.abs(bestScore - runnerUpScore) < 0.05) {
+                    const bestEl = fillCandidates[bestIdx];
+                    const runnerUpEl = fillCandidates[runnerUpIdx];
+                    if (bestEl.label !== runnerUpEl.label && normalize(bestEl.label) !== normalize(runnerUpEl.label)) {
+                      isAmbiguous = true;
+                    }
+                  }
+
+                  if (isAmbiguous) {
+                    const isComm = (currentStepPlan && (currentStepPlan.context === "communication_composer" || currentStepPlan.composerType || currentStepPlan.context === "post_composer" || currentStepPlan.context === "message_composer"));
+                    agentAction = {
+                      action: "NONE",
+                      target: null,
+                      reason: isComm
+                        ? "AMBIGUOUS COMMUNICATION COMPOSER"
+                        : `Ambiguous field targets: multiple candidates match '${currentStepPlan.fieldHint}' with similar confidence.`
+                    };
+                  } else if (bestIdx >= 0 && bestScore >= 0.35) {
+                    const matchedEl = fillCandidates[bestIdx];
+                    const cleanSearchLabel = matchedEl.label && !/^(?:how\s+search\s+works|ai\s+mode|textarea|input)$/i.test(matchedEl.label) ? matchedEl.label : "Search";
+                    agentAction = {
+                      action: "FILL",
+                      target: isSearchStep ? "PRIMARY_SEARCH_INPUT" : (matchedEl.label || matchedEl.ariaLabel || matchedEl.placeholder || currentStepPlan.target || currentStepPlan.fieldHint),
+                      targetRole: isSearchStep ? "PRIMARY_SEARCH_INPUT" : undefined,
+                      targetIndex: matchedEl.index !== undefined ? matchedEl.index : bestIdx,
+                      targetType: matchedEl.type,
+                      targetLabel: isSearchStep ? cleanSearchLabel : (matchedEl.label || matchedEl.ariaLabel || matchedEl.placeholder || currentStepPlan.fieldHint),
+                      fieldHint: currentStepPlan.fieldHint,
+                      semanticTarget: currentStepPlan.semanticTarget || (isSearchStep ? "PRIMARY_SEARCH_INPUT" : (matchedEl.label || matchedEl.ariaLabel || matchedEl.placeholder)),
+                      value: authoritativeVal || currentStepPlan.value || (data.action?.value) || "",
+                      groundingScore: bestScore,
+                      groundingMethod: isSearchStep ? "primary-search-ranking" : (matchedEl.isVisualConfirmed ? "dom+visual-fusion" : "local-fuzzy-match"),
+                      semanticTargetDescriptor: createSemanticTargetDescriptor(matchedEl, currentStepPlan.fieldHint, isSearchStep ? "PRIMARY_SEARCH_INPUT" : expectedRole)
+                    };
+                    const reqTarget = currentStepPlan.target || currentStepPlan.fieldHint || "input";
+                    const candName = agentAction.targetLabel || agentAction.target || reqTarget;
+                    const roleName = agentAction.targetType || "contenteditable";
+                    const scoreVal = Number(bestScore || 0.95).toFixed(2);
+                    const fillVal = agentAction.value || authoritativeVal || currentStepPlan.value || "[text]";
+                    const safeFillVal = (typeof redactText === "function" ? redactText(String(fillVal)) : (window.SIHPrivacyRedactor?.redactText ? window.SIHPrivacyRedactor.redactText(String(fillVal)) : "[text]"));
+                    appendPlannerTrace(`[GROUNDING TRACE]\nAction:\nFILL\n\nRequested Target:\n${reqTarget}\n\nCandidate:\n${candName}\n\nRole:\n${roleName}\n\nSemantic Score:\n${scoreVal}\n\nAction Compatibility:\nHIGH\n\nValue:\n${safeFillVal}\n\nFinal Decision:\nGROUNDED`);
+                  } else {
                   // Section 5 Bounded Recovery: Live DOM re-perception before falling back
                   const recoveryPage = await new Promise((r) => {
                     setTimeout(() => {
@@ -4675,6 +4750,7 @@ document.addEventListener("DOMContentLoaded", () => {
                       reason: `Could not safely ground form field '${currentStepPlan.fieldHint}' on DOM.`
                     };
                   }
+                }
                 }
               }
             } else if (plannedType === "SUBMIT") {
@@ -5898,7 +5974,6 @@ document.addEventListener("DOMContentLoaded", () => {
                 bounds: agentAction.bounds || null
               }
             };
-          } else {
             executionPayload = {
               ...agentAction,
               context: agentAction.context || (currentStepPlan ? currentStepPlan.context : null),
@@ -5907,6 +5982,7 @@ document.addEventListener("DOMContentLoaded", () => {
               semanticTargetDescriptor: agentAction.semanticTargetDescriptor || null
             };
           }
+          executionPayload.perceptionGeneration = agentAction?.perceptionGeneration || currentPerceptionGeneration;
 
           // =====================================================================
           // Final Architecture: On-Device Reasoning & Safety Gate (Human Approval)
@@ -6302,7 +6378,10 @@ document.addEventListener("DOMContentLoaded", () => {
             } catch (navErr) {
               actionExecutionSummary = `Navigation error: ${navErr.message}`;
               rawExecResult = { executed: false, reason: navErr.message };
-            }
+          } else if (typeof executionPayload.targetIndex === "number" && executionPayload.perceptionGeneration && executionPayload.perceptionGeneration < currentPerceptionGeneration) {
+            actionExecutionSummary = `Execution rejected: Stale targetIndex from older perception snapshot (gen ${executionPayload.perceptionGeneration} vs current gen ${currentPerceptionGeneration})`;
+            rawExecResult = { executed: false, reason: "Target index is stale: perception generation mismatch" };
+            actionExecutedSuccessfully = false;
           } else {
             await new Promise((resolveExec) => {
             chrome.tabs.sendMessage(
@@ -6572,6 +6651,15 @@ document.addEventListener("DOMContentLoaded", () => {
             await new Promise((r) => setTimeout(r, ACTION_VERIFICATION_DELAY_MS));
           }
 
+          // Advance perception generation & invalidate old snapshot after state-changing actions (Part 3 & 10)
+          if (["CLICK", "NAVIGATE", "OPEN", "SUBMIT", "SELECT"].includes(agentAction.action)) {
+            currentPerceptionGeneration++;
+            latestVisualElements = null;
+            latestScreenshotDataUrl = null;
+            cachedPerceptionTimestamp = 0;
+            cachedLightweightSignature = null;
+          }
+
           setAgentState(AGENT_STATES.VERIFY, "Verifying post-action outcome...");
           let postActionSignature = null;
           let postPageData = null;
@@ -6580,6 +6668,11 @@ document.addEventListener("DOMContentLoaded", () => {
             chrome.tabs.sendMessage(activeTab.id, { action: "getPageInfo" }, (resp) => {
               if (resp && resp.success) {
                 postPageData = resp;
+                if (resp.visualElements && Array.isArray(resp.visualElements)) {
+                  resp.visualElements.forEach((el) => {
+                    el.perceptionGeneration = currentPerceptionGeneration;
+                  });
+                }
                 resolveDom(resp.visualElements || latestVisualElements);
               } else {
                 resolveDom(latestVisualElements);
@@ -6801,6 +6894,16 @@ document.addEventListener("DOMContentLoaded", () => {
             adaptivePerceptionReused: lastPerceptionDecision.reused,
             groundingStr: `Label='${agentAction.targetLabel || agentAction.target || "none"}', Role=${agentAction.targetType || "element"}, Conf=${agentAction.groundingScore !== undefined ? agentAction.groundingScore : 1.0}`,
             semanticDetails: agentAction?.semanticTargetObject ? `Entity: ${agentAction.semanticTargetObject.entity || "element"}, Descr: ${agentAction.semanticTargetObject.description || "item"}${agentAction.semanticTargetObject.attributes ? `, Attrs: ${JSON.stringify(agentAction.semanticTargetObject.attributes)}` : ""}${agentAction.semanticTargetObject.selector ? `, Selector: ${agentAction.semanticTargetObject.selector.type}` : ""}` : null,
+            auditDetails: agentAction?.action === "FILL" ? {
+              semanticTarget: agentAction.semanticTarget || agentAction.targetRole || "GENERIC_TEXT_EDITOR",
+              resolvedRole: agentAction.targetType || "textbox",
+              resolvedTag: agentAction.targetType || "contenteditable",
+              containerType: taskContext.currentContainer || "dialog",
+              groundingScore: agentAction.groundingScore !== undefined ? agentAction.groundingScore : 0.95,
+              groundingMethod: agentAction.groundingMethod || "semantic+container+visual",
+              postActionPerception: true,
+              verificationResult: m21Verification?.status || "UNKNOWN"
+            } : null,
             risk: safetyGate.risk || "LOW",
             safetyDecision: safetyGate.allowed ? (safetyGate.requiresApproval ? "APPROVED" : "ALLOWED") : "BLOCKED",
             humanApproval: safetyGate.requiresApproval ? "GRANTED" : "NOT REQUIRED",

@@ -286,18 +286,90 @@ async function buildSanitizedScreenshot(screenshotDataUrl, sensitiveRegions) {
   });
 }
 
+/**
+ * Unifies DOM and OCR sensitive findings into canonical SensitiveSpan records (Part 13).
+ * Format: { category, value_or_hash, source: "DOM" | "OCR" | "BOTH", confidence, bbox, context }
+ *
+ * @param {Array<Object>} domSpans
+ * @param {Array<Object>} ocrSpans
+ * @returns {Array<{ category: string, value_or_hash: string, source: "DOM" | "OCR" | "BOTH", confidence: number, bbox: Object|null, context: string }>}
+ */
+function unifySensitiveSpans(domSpans = [], ocrSpans = []) {
+  const unified = [];
+  const matchedOcr = new Set();
+
+  (domSpans || []).forEach((d) => {
+    if (!d) return;
+    let source = "DOM";
+
+    if (Array.isArray(ocrSpans)) {
+      for (let i = 0; i < ocrSpans.length; i++) {
+        if (matchedOcr.has(i)) continue;
+        const o = ocrSpans[i];
+        if (!o) continue;
+
+        const catMatch = (d.category || "").toLowerCase() === (o.category || "").toLowerCase();
+        let bboxOverlap = false;
+        const dBbox = d.bbox || (typeof d.x === "number" ? { x: d.x, y: d.y, width: d.width, height: d.height } : null);
+        const oBbox = o.bbox || (typeof o.x === "number" ? { x: o.x, y: o.y, width: o.width, height: o.height } : null);
+        if (dBbox && oBbox) {
+          const xO = Math.max(0, Math.min(dBbox.x + dBbox.width, oBbox.x + oBbox.width) - Math.max(dBbox.x, oBbox.x));
+          const yO = Math.max(0, Math.min(dBbox.y + dBbox.height, oBbox.y + oBbox.height) - Math.max(dBbox.y, oBbox.y));
+          bboxOverlap = xO > 0 && yO > 0;
+        }
+
+        if (catMatch || bboxOverlap) {
+          source = "BOTH";
+          matchedOcr.add(i);
+          break;
+        }
+      }
+    }
+
+    unified.push({
+      category: d.category || "SENSITIVE_IDENTIFIER",
+      value_or_hash: d.value_or_hash || (d.hash ? d.hash : "redacted"),
+      source: source,
+      confidence: typeof d.confidence === "number" ? d.confidence : 0.95,
+      bbox: d.bbox || (typeof d.x === "number" ? { x: d.x, y: d.y, width: d.width, height: d.height } : null),
+      context: d.context || "",
+      redacted: true
+    });
+  });
+
+  if (Array.isArray(ocrSpans)) {
+    ocrSpans.forEach((o, idx) => {
+      if (matchedOcr.has(idx) || !o) return;
+      unified.push({
+        category: o.category || "SENSITIVE_IDENTIFIER",
+        value_or_hash: o.value_or_hash || (o.hash ? o.hash : "redacted"),
+        source: "OCR",
+        confidence: typeof o.confidence === "number" ? o.confidence : 0.90,
+        bbox: o.bbox || (typeof o.x === "number" ? { x: o.x, y: o.y, width: o.width, height: o.height } : null),
+        context: o.context || "",
+        redacted: true
+      });
+    });
+  }
+
+  return unified;
+}
+
 if (typeof window !== "undefined") {
   window.SIHRedactor = {
     buildSanitizedScreenshot,
-    mergeSensitiveRegions
+    mergeSensitiveRegions,
+    unifySensitiveSpans
   };
   window.buildSanitizedScreenshot = buildSanitizedScreenshot;
   window.mergeSensitiveRegions = mergeSensitiveRegions;
+  window.unifySensitiveSpans = unifySensitiveSpans;
 }
 
 if (typeof module !== "undefined" && module.exports) {
   module.exports = {
     buildSanitizedScreenshot,
-    mergeSensitiveRegions
+    mergeSensitiveRegions,
+    unifySensitiveSpans
   };
 }
